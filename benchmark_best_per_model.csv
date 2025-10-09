@@ -1,0 +1,7 @@
+"Model","Algorithm","Dimension","ESS_per_sec","Acceptance"
+"earnings-earn_height","RWM_baseline",3,37.514216644967,0.9981
+"earnings-log10earn_height","RWM_baseline",3,36.961981853777,0.00105
+"arma-arma11","RWM_baseline",4,51.7638903431921,0.00265
+"arK-arK","RWM_baseline",7,82.875521795602,0.00225
+"bball_drive_event_0-hmm_drive_0","RWM_baseline",8,91.1991506391409,5e-05
+"bball_drive_event_1-hmm_drive_1","RWM_baseline",8,89.155324054388,3e-04
