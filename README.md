@@ -8,33 +8,33 @@ This directory contains R pseudocode implementations for the thesis:
 
 
 
-\## Files
+## Files
 
-\- `basic\_monte\_carlo.R`: Algorithm 1.1 - Basic Monte Carlo integration
+- `basic_monte_carlo.R`: Algorithm 1.1 - Basic Monte Carlo integration
 
-\- `generic\_mcmc.R`: Algorithm 1.2 - Generic MCMC framework
+- `generic_mcmc.R`: Algorithm 1.2 - Generic MCMC framework
 
-\- `metropolis\_hastings.R`: Algorithms 1.3-1.4 - Metropolis-Hastings variants
+- `metropolis_hastings.R`: Algorithms 1.3-1.4 - Metropolis-Hastings variants
 
-\- `hmc\_leapfrog.R`: Algorithm 1.5 - Hamiltonian Monte Carlo
+- `hmc_leapfrog.R`: Algorithm 1.5 - Hamiltonian Monte Carlo
 
 
 
-\## Usage
+## Usage
 
 These implementations prioritize clarity over efficiency. For production use,
 
 consider established packages like:
 
-\- `mcmc` package for Metropolis-Hastings
+- `mcmc` package for Metropolis-Hastings
 
-\- `rstan` or `cmdstanr` for HMC/NUTS
+- `rstan` or `cmdstanr` for HMC/NUTS
 
 
 
-\## Requirements
+## Requirements
 
-\- R version 4.0.0 or higher
+- R version 4.0.0 or higher
 
-\- No external dependencies (uses only base R)
+- No external dependencies (uses only base R)
 
