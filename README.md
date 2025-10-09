@@ -1,4 +1,4 @@
-\# MCMC Algorithm Implementations
+# MCMC Algorithm Implementations
 
 
 
