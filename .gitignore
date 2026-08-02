@@ -1,0 +1,26 @@
+# R session state - machine-local, never useful to anyone else
+.Rhistory
+.RData
+.Ruserdata
+.Rapp.history
+
+# RStudio
+.Rproj.user/
+*.Rproj
+
+# Knitr / R Markdown build artefacts
+*_files/
+*_cache/
+*.utf8.md
+*.knit.md
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+~$*
+
+# Note on the .rds files: benchmark_config.rds, benchmark_results*.rds and
+# posteriordb_discovery.rds ARE tracked on purpose. They are the saved output of
+# a benchmark run that takes network access and real time to reproduce, so they
+# stay in the repo as the evidence behind the figures and summary tables.
