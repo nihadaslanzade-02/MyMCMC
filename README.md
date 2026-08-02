@@ -3,6 +3,7 @@
 [![R](https://img.shields.io/badge/R-4.0%2B-276DC3)](https://www.r-project.org/)
 [![Core](https://img.shields.io/badge/core%20algorithms-base%20R-lightgrey)](#the-algorithms)
 [![Benchmark](https://img.shields.io/badge/benchmark-posteriordb-blue)](https://github.com/stan-dev/posteriordb)
+[![CI](https://github.com/nihadaslanzade-02/MyMCMC/actions/workflows/ci.yml/badge.svg)](https://github.com/nihadaslanzade-02/MyMCMC/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Reference R implementations of the classical and adaptive MCMC algorithms from the thesis **"Exploration of Adaptive Algorithms"**, plus an empirical harness that runs them against real Bayesian posteriors from [posteriordb](https://github.com/stan-dev/posteriordb) and measures how they actually behave.
@@ -12,7 +13,7 @@ The repository has two halves that are worth judging separately:
 1. **The samplers** - Monte Carlo integration, a generic MCMC skeleton, Metropolis-Hastings, Random Walk Metropolis, Hamiltonian Monte Carlo with leapfrog integration, Adaptive Metropolis, and Robust Adaptive Metropolis. Written for readability, in base R, each one documented with its inputs, outputs and the algorithm number it corresponds to in the thesis.
 2. **The benchmark** - discovery of which posteriordb models have reference posteriors, dimension extraction, model selection across dimension bands, multi-chain timed runs, ESS/R-hat/RMSE metrics, checkpointing, aggregation and figures.
 
-The benchmark run committed here is a **pilot**: the harness completes end to end, and it produces one clean result about acceptance-rate control. Its convergence diagnostics do not pass, and the [Results](#results) section says exactly which numbers can and cannot be read as findings. That distinction is the point of publishing it.
+The benchmark run committed here is a **pilot**, and reading it critically is the point of publishing it. It produces one clean result about acceptance-rate control. Its ESS and R-hat columns turned out to be measuring something other than what they were labelled, which the [Results](#results) section works through and which the code now fixes; the committed numbers predate that fix and the analysis stage refuses to chart them.
 
 ---
 
@@ -43,7 +44,7 @@ The benchmark run committed here is a **pilot**: the harness completes end to en
 
 ### Building the comparison set
 
-[`benchamrking_posteriordb.R`](benchamrking_posteriordb.R) walks the whole posteriordb catalogue over its GitHub connection and works out what is actually usable:
+[`benchmarking_posteriordb.R`](benchmarking_posteriordb.R) walks the whole posteriordb catalogue over its GitHub connection and works out what is actually usable:
 
 | Stage | Result |
 |---|---|
@@ -67,7 +68,13 @@ This is a deliberate trade and worth understanding before reading any number bel
 
 ### What gets measured
 
-3 algorithms × 8 models × 4 chains × 10,000 iterations, half discarded as burn-in. Per chain: **ESS** (`posterior::ess_bulk`), **R-hat**, **RMSE** and **MAE** of the posterior mean against the reference, **acceptance rate**, and wall-clock **runtime** - with ESS/second as the efficiency measure. Chains are wrapped in `tryCatch` so one failure does not take down the sweep, and results are checkpointed to disk every 3 models.
+3 algorithms × 8 models × 4 chains × 10,000 iterations, half discarded as burn-in.
+
+**Per chain**, because they are properties of one chain: **RMSE** and **MAE** of the posterior mean against the reference, **acceptance rate**, wall-clock **runtime**.
+
+**Across the four chains together**, because they are not: per-parameter **ESS** (bulk and tail) and **R-hat**, via `posterior::summarise_draws()` on an iterations × chains × parameters array. ESS/second divides the all-chains ESS by the all-chains runtime.
+
+Chains are wrapped in `tryCatch` so one failure does not take down the sweep, and results are checkpointed to disk every 3 models.
 
 Of the 8 selected models, 7 completed. `mcycle_gp-accel_gp` (66 parameters) was skipped by the `max_dimension = 50` guard.
 
@@ -104,23 +111,51 @@ Three things follow, and none of them are the headline the summary table appears
 2. **No chain converged, so no accuracy comparison stands.** R-hat above 2 means the chains have not mixed; the RMSE column cannot separate the algorithms while that is true.
 3. **Mean RMSE across models is not a meaningful aggregate.** RMSE is never scale-normalised, and `earnings-earn_height` is on a raw dollar scale where RMSE reaches 185-370 while every other model sits below 0.5. The 61.8 mean RMSE reported for RAM is essentially that one model.
 
-There is also a strong hint of a metric bug worth chasing: ESS tracks the parameter count closely - 3 parameters gives ESS ≈ 3.6, 4 gives ≈ 4.9, 7 gives ≈ 7.9, 8 gives ≈ 8.5 - across every model and every algorithm. A genuine effective sample size has no reason to equal the dimension. `ess_bulk()` is most likely being handed a multi-parameter `draws_matrix` where it expects a single variable.
+### The metric bug, confirmed and fixed
 
-![ESS per second](figures/ess_comparison.png)
+The hint the previous version of this section flagged turned out to be right, and the problem is worse than a bias: **ESS was reporting the parameter count.** Across every model and algorithm in the committed run it correlates with dimension at **r = 0.9991** - 3 parameters gives 3.7, 4 gives 5.0, 8 gives 8.4, 26 gives 26.4.
+
+One call causes it. `posterior::ess_bulk()` reduces its input to a single number; handed a whole draws × parameters matrix, the spread between parameters sitting at different locations swamps the autocorrelation within each one, and the estimate collapses onto the parameter count. Running it on four independent, perfectly mixed chains reproduces the committed numbers almost exactly, which is the proof that they say nothing about the samplers:
+
+| Dimension | ESS from the old call | ESS computed correctly |
+|---:|---:|---:|
+| 3 | 3.7 | ~3,900 of 4,000 draws |
+| 8 | 8.5 | ~3,900 |
+| 26 | 26.4 | ~3,900 |
+
+R-hat had a second, independent problem. It compares between-chain variance against within-chain variance, and it was being computed inside the chain loop, where there is no between-chain term to form. Averaging four such values afterwards does not reconstruct it, so the diagnostic that detects non-mixing was never computed at all.
+
+Both are fixed in [`benchmark_metrics.R`](benchmark_metrics.R), which assembles an iterations × chains × parameters array and reports per-parameter diagnostics across the whole set of chains. Each fix is pinned by a test that fails against the old implementation.
+
+**The committed `.rds` files, CSVs and ESS figure predate this and should not be read.** Results now carry a schema marker, and [`analyze_results.R`](analyze_results.R) refuses a file without one rather than charting numbers whose labels do not match what they measure. Regenerating them means re-running the benchmark, which needs network access and several hours.
+
+The acceptance-rate result above is unaffected, because it never depended on ESS or R-hat.
+
 ![RMSE vs dimension](figures/rmse_dimension.png)
 
 ---
 
 ## Scope and next steps
 
+### Done
+
+The three defects this section used to list are fixed, each pinned by a test that fails when the fix alone is reverted:
+
+- **ESS is per parameter and computed across chains.** It no longer returns the dimension.
+- **R-hat is formed between chains**, so it can detect the non-mixing it exists to detect. Fewer than two chains warns rather than returning a number that cannot mean anything.
+- **The analysis reads the completed run**, not the 6-model checkpoint, and its figure subtitles are derived from the data rather than typed by hand.
+
+Two more surfaced while writing the tests. `N_models` was reported as `n() / 4` in two summaries, where the chains had already been averaged, so 7 models came out as 1.75. And `geom_smooth(method = "loess")` was fitting a band through about five points per algorithm; loess replies *"span too small, fewer data values than degrees of freedom"* and falls back to a pseudoinverse, so the curve was an artefact and one figure's subtitle was leaning on it for a claim. Both replaced with what was actually measured.
+
+### Still open
+
 In rough order of how much each would change the conclusions:
 
-1. **Fix the ESS computation** and re-run. Until effective sample size is per-parameter and believable, no efficiency claim is safe.
-2. **Compute R-hat across the 4 chains, not within each one.** [`run_benchmarking.R`](run_benchmarking.R) calls `compute_metrics()` per chain and averages, so the multi-chain diagnostic - the one that actually detects non-mixing - is never computed. The chains are already being run; only the aggregation needs changing.
-3. **Point the analysis at the completed results.** [`analyze_results.R`](analyze_results.R) reads `benchmark_results_partial.rds` (6 models) rather than `benchmark_results.rds` (7). `diamonds-diamonds`, at 26 parameters the only high-dimensional model that ran, is missing from every figure and CSV - which is why the figures announce 7 models and a 3-26 parameter range while plotting 6 models topping out at 8. One-line change, and it restores the entire high-dimension end of the comparison.
-4. **Give the chains room.** 10,000 iterations for an adaptive sampler that only begins adapting after burn-in is thin; RAM's shape update fires every 50 iterations on a 500-iteration window.
-5. **Normalise RMSE** per model - by reference posterior SD - before averaging across models.
-6. **Wire in `bridgestan`** to sample the true posteriors instead of Gaussian surrogates. This is the one that makes the benchmark a statement about adaptive MCMC rather than about adaptive MCMC on Gaussian targets.
+1. **Re-run the benchmark.** Everything above changes what the numbers mean, so the committed results are stale by construction. This is the next real step and the only one that needs hours and network access.
+2. **Give the chains room.** 10,000 iterations for an adaptive sampler that only begins adapting after burn-in is thin; RAM's shape update fires every 50 iterations on a 500-iteration window.
+3. **Normalise RMSE** per model - by reference posterior SD - before averaging across models.
+4. **Unify the `n_iterations` convention.** `metropolis_hastings.R` treats it as the number of draws to keep and runs `burn_in` on top; `adaptive_algorithms.R` treats it as the total chain length with burn-in taken out. Both are defensible, the difference is silent, and a test currently pins each so nobody merges them by accident.
+5. **Wire in `bridgestan`** to sample the true posteriors instead of Gaussian surrogates. This is the one that makes the benchmark a statement about adaptive MCMC rather than about adaptive MCMC on Gaussian targets.
 
 ---
 
@@ -134,20 +169,47 @@ MyMCMC/
 ├── hmc_leapfrog.R                   # Alg 1.5 - HMC, leapfrog integrator, energy diagnostics
 ├── adaptive_algorithms.R            # AM, RAM, and the non-adaptive RWM baseline
 │
-├── benchamrking_posteriordb.R       # stage 1 - discover, extract dimensions, select, configure
-├── run_benchmarking.R               # stage 2 - build targets, run chains, compute metrics
+├── benchmarking_posteriordb.R       # stage 1 - discover, extract dimensions, select, configure
+├── run_benchmarking.R               # stage 2 - build targets, run chains
+├── benchmark_metrics.R              # accuracy per chain, convergence across chains
 ├── analyze_results.R                # stage 3 - aggregate, tabulate, plot
+│
+├── tests/                           # 22 tests, base-R runner, no framework needed
 │
 ├── posteriordb_discovery.rds        # 47 posteriors with references, with dimensions
 ├── benchmark_config.rds             # selected models + reference draws (9.4 MB, regenerable)
-├── benchmark_results.rds            # 7 models complete
-├── benchmark_results_partial.rds    # 6-model checkpoint (what analyze_results.R reads)
+├── benchmark_results.rds            # 7 models complete, predates the diagnostics fix
+├── benchmark_results_partial.rds    # 6-model checkpoint written mid-run
 ├── benchmark_summary_*.csv          # aggregated tables
 ├── benchmark_best_per_model.csv
 │
 ├── figures/                         # 4 figures, PDF + PNG at 300 dpi
+├── .github/workflows/ci.yml         # parse every script, run the suite on R 4.3 / 4.4 / release
 └── LICENSE
 ```
+
+---
+
+## Tests
+
+```bash
+Rscript tests/run_tests.R
+```
+
+22 tests, a few seconds, no network and no benchmark data. The runner is about
+80 lines of base R providing `test_that` and the `expect_*` calls, because the
+samplers deliberately depend on nothing beyond base R and MASS and the suite
+keeps that property: its only package is `posterior`, which the diagnostics
+under test already require.
+
+The convergence tests are the ones worth reading. They build chains whose
+correct answers are known by construction - independent draws for the healthy
+case, chains stuck in separate places for the unhealthy one - so a failure
+means the diagnostic is wrong rather than that an expected value was copied
+from a previous run.
+
+CI runs the suite on R 4.3, 4.4 and release, and parses every script first,
+since the benchmark stages cannot run there.
 
 ---
 
@@ -188,7 +250,7 @@ for (algo in list(AM = adaptive_metropolis, RAM = robust_adaptive_metropolis)) {
 The full benchmark, in order - stage 1 takes some minutes, since it checks all 147 posteriors for reference draws:
 
 ```r
-source("benchamrking_posteriordb.R")   # -> posteriordb_discovery.rds, benchmark_config.rds
+source("benchmarking_posteriordb.R")   # -> posteriordb_discovery.rds, benchmark_config.rds
 source("run_benchmarking.R")           # -> benchmark_results.rds
 source("analyze_results.R")            # -> summary CSVs and figures/
 ```
