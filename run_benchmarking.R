@@ -9,6 +9,7 @@ library(posterior)
 library(dplyr)
 
 source("adaptive_algorithms.R")
+source("benchmark_metrics.R")
 
 # ============================================================================
 # CREATE LOG DENSITY FUNCTION
@@ -89,55 +90,6 @@ create_log_density <- function(posterior_name, pdb) {
 }
 
 # ============================================================================
-# DEFINE METRICS COMPUTATION
-# ============================================================================
-compute_metrics <- function(samples, reference_draws, runtime) {
-  
-  tryCatch({
-    # Convert to posterior format
-    samples_draws <- posterior::as_draws_matrix(samples)
-    
-    # 1. ESS per second
-    ess <- posterior::ess_bulk(samples_draws)
-    ess_per_sec <- ess / runtime
-    
-    # 2. R-hat (within-chain diagnostic)
-    rhat <- posterior::rhat(samples_draws)
-    
-    # 3. RMSE vs reference
-    ref_means <- colMeans(reference_draws)
-    sample_means <- colMeans(samples)
-    rmse <- sqrt(mean((sample_means - ref_means)^2))
-    
-    # 4. Mean absolute error
-    mae <- mean(abs(sample_means - ref_means))
-    
-    list(
-      ess_median = median(ess, na.rm = TRUE),
-      ess_min = min(ess, na.rm = TRUE),
-      ess_per_sec_median = median(ess_per_sec, na.rm = TRUE),
-      ess_per_sec_min = min(ess_per_sec, na.rm = TRUE),
-      rhat_max = max(rhat, na.rm = TRUE),
-      rmse = rmse,
-      mae = mae,
-      n_divergent_params = sum(!is.finite(rhat))
-    )
-  }, error = function(e) {
-    warning("Error computing metrics: ", e$message)
-    list(
-      ess_median = NA,
-      ess_min = NA,
-      ess_per_sec_median = NA,
-      ess_per_sec_min = NA,
-      rhat_max = NA,
-      rmse = NA,
-      mae = NA,
-      n_divergent_params = NA
-    )
-  })
-}
-
-# ============================================================================
 # RUN BENCHMARK FOR ONE MODEL
 # ============================================================================
 benchmark_model <- function(posterior_name, pdb, algorithms, 
@@ -197,24 +149,26 @@ benchmark_model <- function(posterior_name, pdb, algorithms,
   
   # Initial value (use reference mean)
   initial <- colMeans(ref_matrix)
-  
+  reference_means <- colMeans(ref_matrix)
+
   results <- list()
-  
+
   # Run each algorithm
   for (algo_name in names(algorithms)) {
     cat("\n  Running:", algo_name, "\n")
-    
+
     algo_results <- list()
-    
+    chain_samples <- list()
+
     for (chain in 1:n_chains) {
       cat("    Chain", chain, "...")
-      
+
       # Slight perturbation of initial value
       init <- initial + rnorm(d, 0, 0.1)
-      
+
       # Time the algorithm
       start_time <- Sys.time()
-      
+
       algo_output <- tryCatch({
         algorithms[[algo_name]](
           target_log_density = log_density,
@@ -226,34 +180,50 @@ benchmark_model <- function(posterior_name, pdb, algorithms,
         cat(" ERROR:", e$message, "\n")
         return(NULL)
       })
-      
+
       if (is.null(algo_output)) {
         next
       }
-      
+
       runtime <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
-      
-      cat(" Done (", round(runtime, 1), "s, acc=", 
+
+      cat(" Done (", round(runtime, 1), "s, acc=",
           round(algo_output$acceptance_rate, 3), ")\n", sep = "")
-      
-      # Compute metrics
-      metrics <- compute_metrics(
-        algo_output$samples,
-        ref_matrix,
-        runtime
-      )
-      
-      algo_results[[chain]] <- c(
-        metrics,
-        acceptance_rate = algo_output$acceptance_rate,
-        runtime = runtime
+
+      # Per-chain accuracy only. The convergence diagnostics need every chain
+      # at once and are computed below, after the loop.
+      accuracy <- compute_accuracy(algo_output$samples, reference_means, runtime)
+
+      chain_samples[[length(chain_samples) + 1]] <- algo_output$samples
+
+      algo_results[[length(algo_results) + 1]] <- c(
+        accuracy,
+        acceptance_rate = algo_output$acceptance_rate
       )
     }
-    
+
     # Aggregate across chains
     if (length(algo_results) > 0) {
-      results[[algo_name]] <- data.frame(
-        do.call(rbind, algo_results)
+      per_chain <- data.frame(do.call(rbind, algo_results))
+
+      # Chains run sequentially, so the wall-clock cost of the whole set is
+      # their total. ESS is likewise an all-chains quantity, so ESS/second is
+      # formed from the two totals rather than from one chain's share.
+      total_runtime <- sum(unlist(per_chain$runtime), na.rm = TRUE)
+
+      convergence <- compute_convergence(chain_samples, common_params, total_runtime)
+
+      cat(sprintf(
+        "    -> ESS bulk median %.1f of %d draws, R-hat max %.3f (%d/%d parameters unconverged)\n",
+        convergence$ess_bulk_median, convergence$total_draws,
+        convergence$rhat_max, convergence$n_params_unconverged, convergence$n_params
+      ))
+
+      results[[algo_name]] <- list(
+        per_chain = per_chain,
+        convergence = convergence,
+        total_runtime = total_runtime,
+        n_chains_completed = length(chain_samples)
       )
     } else {
       cat("    No successful chains for", algo_name, "\n")
@@ -359,8 +329,14 @@ cat("Successful models:", successful_models, "\n")
 cat("Failed/skipped models:", failed_models, "\n")
 cat("\nResults saved to: benchmark_results.rds\n")
 
-# Save with metadata
+# Save with metadata.
+#
+# `schema` marks results produced by the corrected diagnostics. Files written
+# before that fix carry per-chain ESS and R-hat values that are not what their
+# names say, so analyze_results.R checks for this marker and refuses to plot a
+# file without it rather than silently charting the old numbers.
 final_output <- list(
+  schema = "chainwise-diagnostics-v2",
   results = all_results,
   config = BENCHMARK_CONFIG,
   algorithms = names(algorithms),

@@ -7,8 +7,35 @@ library(dplyr)
 library(tidyr)
 library(knitr)
 
-# Load results
-results <- readRDS("benchmark_results_partial.rds")
+# Load results.
+#
+# This reads the completed run, not the checkpoint. An earlier version read
+# benchmark_results_partial.rds, which is written every 3 models and stopped at
+# 6 of the 7 that finished. The missing one was diamonds-diamonds at 26
+# parameters, the only high-dimensional model in the set, so every figure and
+# CSV lost the entire top of the dimension range while their subtitles still
+# announced it.
+RESULTS_FILE <- "benchmark_results.rds"
+
+if (!file.exists(RESULTS_FILE)) {
+  stop(RESULTS_FILE, " not found. Run run_benchmarking.R first.")
+}
+
+benchmark <- readRDS(RESULTS_FILE)
+
+# Refuse results that predate the diagnostics fix rather than charting numbers
+# whose labels do not match what they measure. See run_benchmarking.R.
+if (!identical(benchmark$schema, "chainwise-diagnostics-v2")) {
+  stop(
+    RESULTS_FILE, " was written before the convergence diagnostics were fixed.\n",
+    "  Its ESS and R-hat columns were computed per chain over a whole\n",
+    "  multi-parameter matrix, so they report the parameter count rather than\n",
+    "  sampling quality. Re-run run_benchmarking.R to regenerate it."
+  )
+}
+
+results <- benchmark$results
+cat("Loaded", length(results), "models from", RESULTS_FILE, "\n")
 
 # ============================================================================
 # 1. CREATE SUMMARY TABLE
@@ -18,21 +45,30 @@ summary_rows <- list()
 
 for (model_name in names(results)) {
   model_res <- results[[model_name]]
-  
+
   for (algo_name in names(model_res)) {
-    df <- model_res[[algo_name]]
-    
+    entry <- model_res[[algo_name]]
+    per_chain <- entry$per_chain
+    conv <- entry$convergence
+
     summary_rows[[length(summary_rows) + 1]] <- data.frame(
       Model = model_name,
       Algorithm = algo_name,
       Dimension = attr(model_res, "dimension"),
-      ESS_median = mean(unlist(df$ess_median), na.rm = TRUE),
-      ESS_per_sec = mean(unlist(df$ess_per_sec_median), na.rm = TRUE),
-      RMSE = mean(unlist(df$rmse), na.rm = TRUE),
-      MAE = mean(unlist(df$mae), na.rm = TRUE),
-      Acceptance = mean(unlist(df$acceptance_rate), na.rm = TRUE),
-      Runtime = mean(unlist(df$runtime), na.rm = TRUE),
-      Rhat_max = mean(unlist(df$rhat_max), na.rm = TRUE),
+      # Averaged over chains, because accuracy and acceptance are per-chain.
+      RMSE = mean(unlist(per_chain$rmse), na.rm = TRUE),
+      MAE = mean(unlist(per_chain$mae), na.rm = TRUE),
+      Acceptance = mean(unlist(per_chain$acceptance_rate), na.rm = TRUE),
+      Runtime = mean(unlist(per_chain$runtime), na.rm = TRUE),
+      # Taken as computed, because these are already all-chains quantities.
+      # Averaging them over chains is what made the R-hat column meaningless.
+      ESS_median = conv$ess_bulk_median,
+      ESS_min = conv$ess_bulk_min,
+      ESS_per_sec = conv$ess_per_sec_median,
+      Rhat_max = conv$rhat_max,
+      Params_unconverged = conv$n_params_unconverged,
+      N_params = conv$n_params,
+      Total_draws = conv$total_draws,
       stringsAsFactors = FALSE
     )
   }
@@ -41,18 +77,20 @@ for (model_name in names(results)) {
 summary_df <- bind_rows(summary_rows)
 summary_df <- as.data.frame(summary_df)
 
-# Dimension
-dimension_map <- c(
-  "arma-arma11" = 4,
-  "earnings-earn_height" = 3,
-  "earnings-log10earn_height" = 3,
-  "arK-arK" = 7,
-  "bball_drive_event_0-hmm_drive_0" = 8,
-  "bball_drive_event_1-hmm_drive_1" = 8,
-  "diamonds-diamonds" = 26
-)
+# Dimension comes from the run itself. A hardcoded lookup table used to sit
+# here, which meant the plots could disagree with the models actually loaded.
+summary_df$Dimension <- summary_df$N_params
 
-summary_df$Dimension <- dimension_map[summary_df$Model]
+# Subtitles are derived for the same reason: they used to be written by hand
+# and kept announcing 7 models and a 3 to 26 parameter range while the partial
+# results file supplied 6 models topping out at 8.
+n_models <- length(unique(summary_df$Model))
+n_chains_run <- max(unlist(lapply(results, function(m) {
+  max(vapply(m, function(a) a$n_chains_completed, integer(1)))
+})))
+dim_range <- range(summary_df$Dimension, na.rm = TRUE)
+coverage <- sprintf("%d models, %d chains each, %d to %d parameters",
+                    n_models, n_chains_run, dim_range[1], dim_range[2])
 
 # Add dimension category
 summary_df$DimCategory <- cut(as.numeric(summary_df$Dimension), 
@@ -79,13 +117,18 @@ cat(rep("=", 80), "\n", sep = "")
 cat("ALGORITHM PERFORMANCE SUMMARY\n")
 cat(rep("=", 80), "\n\n", sep = "")
 
+# summary_df already holds one row per model and algorithm, with the chains
+# averaged in section 1. Dividing the row count by the chain count, as an
+# earlier version did, reported 1.75 models where there are 7.
 algo_summary <- summary_df %>%
   group_by(Algorithm) %>%
   summarise(
-    N_models = n() / 4,  # 4 chains per model
+    N_models = n(),
     Mean_Acceptance = mean(Acceptance, na.rm = TRUE),
     SD_Acceptance = sd(Acceptance, na.rm = TRUE),
+    Mean_ESS = mean(ESS_median, na.rm = TRUE),
     Mean_ESS_per_sec = mean(ESS_per_sec, na.rm = TRUE),
+    Worst_Rhat = max(Rhat_max, na.rm = TRUE),
     Mean_RMSE = mean(RMSE, na.rm = TRUE),
     Mean_Runtime = mean(Runtime, na.rm = TRUE),
     .groups = "drop"
@@ -106,9 +149,10 @@ cat(rep("=", 80), "\n\n", sep = "")
 dim_summary <- summary_df %>%
   group_by(Algorithm, DimCategory) %>%
   summarise(
-    N_models = n() / 4,
+    N_models = n(),
     Mean_Acceptance = mean(Acceptance, na.rm = TRUE),
     Mean_ESS_per_sec = mean(ESS_per_sec, na.rm = TRUE),
+    Worst_Rhat = max(Rhat_max, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   arrange(DimCategory, desc(Mean_ESS_per_sec))
@@ -144,13 +188,13 @@ p1 <- ggplot(summary_df, aes(x = reorder(Model, Dimension), y = Acceptance,
                              color = Algorithm, group = Algorithm)) +
   geom_point(size = 3) +
   geom_line() +
-  geom_hline(yintercept = 0.234, linetype = "dashed", color = "gray50", size = 0.8) +
+  geom_hline(yintercept = 0.234, linetype = "dashed", color = "gray50", linewidth = 0.8) +
   annotate("text", x = 1, y = 0.26, label = "Optimal (0.234)", 
            vjust = 0, color = "gray50", size = 3.5) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Acceptance Rates Across Models",
-       subtitle = "Models ordered by dimension (left to right: 3 to 26 parameters)",
+       subtitle = paste("Models ordered by dimension.", coverage),
        y = "Acceptance Rate",
        x = "Model",
        color = "Algorithm") +
@@ -168,7 +212,7 @@ p2 <- ggplot(summary_df, aes(x = Algorithm, y = ESS_per_sec, fill = Algorithm)) 
   scale_y_log10(labels = scales::comma) +
   scale_fill_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Sampling Efficiency: Effective Sample Size per Second",
-       subtitle = "Distribution across 7 models × 4 chains (log scale)",
+       subtitle = paste0("Across ", coverage, ", log scale"),
        y = "ESS per Second (log₁₀ scale)",
        x = "Algorithm") +
   theme_minimal(base_size = 12) +
@@ -181,7 +225,13 @@ ggsave("figures/ess_comparison.png", p2, width = 8, height = 6, dpi = 300)
 # Figure 3: RMSE vs Dimension
 p3 <- ggplot(summary_df, aes(x = Dimension, y = RMSE, color = Algorithm, shape = Algorithm)) +
   geom_point(size = 3, alpha = 0.7) +
-  geom_smooth(method = "loess", se = TRUE, alpha = 0.15) +
+  # A loess band used to sit here. With one point per model there are only
+  # a handful per algorithm, and loess replies "span too small, fewer data
+  # values than degrees of freedom" and falls back to a pseudoinverse. The
+  # curve it drew was an artefact, and Figure 4 leaned on it for a claim
+  # about RAM holding its target. Connecting the observed points states
+  # exactly what was measured and nothing more.
+  geom_line(alpha = 0.5) +
   scale_y_log10() +
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Accuracy vs Model Dimension",
@@ -201,8 +251,8 @@ ggsave("figures/rmse_dimension.png", p3, width = 10, height = 6, dpi = 300)
 p4 <- ggplot(summary_df, aes(x = Dimension, y = Acceptance, 
                              color = Algorithm, shape = Algorithm)) +
   geom_point(size = 3, alpha = 0.7) +
-  geom_smooth(method = "loess", se = TRUE, alpha = 0.15) +
-  geom_hline(yintercept = 0.234, linetype = "dashed", color = "gray50", size = 0.8) +
+  geom_line(alpha = 0.5) +   # see note on the loess band above
+  geom_hline(yintercept = 0.234, linetype = "dashed", color = "gray50", linewidth = 0.8) +
   annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0.20, ymax = 0.27, 
            alpha = 0.1, fill = "blue") +
   annotate("text", x = 25, y = 0.28, label = "Optimal range", 
@@ -210,7 +260,7 @@ p4 <- ggplot(summary_df, aes(x = Dimension, y = Acceptance,
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
   labs(title = "Acceptance Rate Stability Across Dimensions",
-       subtitle = "RAM maintains near-optimal rates consistently",
+       subtitle = paste("Dashed line marks the 0.234 optimum.", coverage),
        y = "Acceptance Rate",
        x = "Number of Parameters",
        color = "Algorithm",
