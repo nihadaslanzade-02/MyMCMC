@@ -183,6 +183,92 @@ test_that("every sampler reads n_iterations as the total chain length", {
 })
 
 # ---------------------------------------------------------------------------
+test_that("AM's recursive covariance matches recomputing it outright", {
+  # AM used to call cov(chain[1:(t-1), ]) at every adaptation, which costs
+  # O(t*d^2) and so gets more expensive the longer the chain runs. Welford's
+  # recursion is O(d^2) per iteration regardless. The two must agree, or the
+  # speedup has quietly changed the algorithm.
+  set.seed(21)
+  d <- 4
+
+  fit <- adaptive_metropolis(std_normal(d), initial_value = rep(0, d),
+                             n_iterations = 1000, burn_in = 500,
+                             adapt_interval = 50, adapt_start = 100,
+                             adapt_stop = 1000)
+
+  # The last adaptation fires at t = 1000 over chain[1:999, ].
+  recomputed <- cov(fit$full_chain[1:999, ]) + diag(1e-6, d)
+  expect_equal(fit$final_cov, recomputed, tolerance = 1e-10)
+})
+
+# ---------------------------------------------------------------------------
+test_that("adaptation runs during burn-in and freezes before the kept draws", {
+  # The old schedule was `t > burn_in`: fixed proposal for the whole of
+  # burn-in, then adapting for every retained draw. That is backwards on both
+  # counts. ESS and R-hat are defined for a fixed kernel, so the retained
+  # stretch is exactly where adaptation must not still be running.
+  set.seed(22)
+  target <- std_normal(3)
+
+  frozen <- adaptive_metropolis(target, rep(0, 3), n_iterations = 2000,
+                                burn_in = 500, adapt_interval = 50,
+                                adapt_start = 100)
+  # t in {100, 150, ..., 500}
+  expect_equal(frozen$n_adaptations, 9)
+
+  # Haario's original algorithm adapts forever; one argument gets it back.
+  forever <- adaptive_metropolis(target, rep(0, 3), n_iterations = 2000,
+                                 burn_in = 500, adapt_interval = 50,
+                                 adapt_start = 100, adapt_stop = 2000)
+  expect_equal(forever$n_adaptations, 39)
+})
+
+# ---------------------------------------------------------------------------
+test_that("RAM's shape window grows with the chain", {
+  # It was hardcoded to 500, so a longer run gave the scale adaptation more
+  # iterations while the shape estimate kept reading the same short tail.
+  set.seed(23)
+  target <- std_normal(2)
+
+  short <- robust_adaptive_metropolis(target, c(0, 0), n_iterations = 4000,
+                                      burn_in = 1000)
+  long <- robust_adaptive_metropolis(target, c(0, 0), n_iterations = 40000,
+                                     burn_in = 1000)
+
+  expect_equal(short$shape_window, 500)    # floor, for short runs
+  expect_equal(long$shape_window, 2000)    # n_iterations / 20
+})
+
+# ---------------------------------------------------------------------------
+test_that("the baseline's proposal follows the scale it is given", {
+  # The scale was the absolute constant (2.38 / sqrt(d)) * 0.1, which is a
+  # sensible step only for a target that happens to be that wide. The
+  # benchmark's posteriors span seven orders of magnitude in per-parameter SD,
+  # so the baseline's acceptance rate was reporting that constant rather than
+  # anything about random walk Metropolis.
+  set.seed(24)
+  sds <- c(1000, 0.001)
+  target <- function(x) -0.5 * sum((x / sds)^2)
+
+  informed <- random_walk_baseline(target, c(0, 0), n_iterations = 20000,
+                                   burn_in = 5000, proposal_scale = sds)
+  blind <- random_walk_baseline(target, c(0, 0), n_iterations = 20000,
+                                burn_in = 5000)
+
+  # Given the marginal scales it mixes and recovers them.
+  expect_gt(informed$acceptance_rate, 0.15)
+  recovered <- apply(informed$samples, 2, sd)
+  expect_lt(max(abs(log10(recovered / sds))), 0.3)
+
+  # Given none, one step size cannot fit both coordinates at once.
+  expect_lt(blind$acceptance_rate, 0.05)
+
+  expect_error(random_walk_baseline(target, c(0, 0), n_iterations = 100,
+                                    burn_in = 10, proposal_scale = c(1, 1, 1)),
+               "one entry per parameter")
+})
+
+# ---------------------------------------------------------------------------
 test_that("a burn-in that swallows the chain is rejected, not silently wrong", {
   # chain[(burn_in + 1):n_iterations, ] with burn_in >= n_iterations does not
   # error in R: 1001:1000 counts backwards and returns two rows, one of them
