@@ -293,13 +293,17 @@ for (algo in list(AM = adaptive_metropolis, RAM = robust_adaptive_metropolis)) {
 }
 ```
 
-The full benchmark, in order - stage 1 takes some minutes, since it checks all 147 posteriors for reference draws:
+The full benchmark, in order:
 
 ```r
 source("benchmarking_posteriordb.R")   # -> posteriordb_discovery.rds, benchmark_config.rds
 source("run_benchmarking.R")           # -> benchmark_results.rds
 source("analyze_results.R")            # -> summary CSVs and figures/
 ```
+
+Stage 1 takes some minutes, since it checks all 147 posteriors for reference draws, and it is the only stage that needs the network unconditionally. Stage 2 reads the reference draws back out of `benchmark_config.rds` and only reaches for posteriordb to fetch a Stan program not already in `stan_cache/`; it takes about half an hour at the committed settings and reproduces exactly from `BENCHMARK_CONFIG$seed`. Stage 3 is seconds.
+
+`benchmark_config.rds` is committed, so stage 2 and stage 3 run without stage 1.
 
 ---
 
