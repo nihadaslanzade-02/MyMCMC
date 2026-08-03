@@ -111,13 +111,13 @@ The baseline is handed each parameter's marginal standard deviation, so scale is
 | `earnings-log10earn_height` | 3 | 1,302 | 4,646 | 4,635 | 819 | 0.18 |
 | `diamonds-diamonds` | 26 | 241,407 | 2,177 | 1,754 | **6.5** | 0.003 |
 
-At a correlation condition number near 1 the three algorithms are indistinguishable, and adaptation is pure overhead. By 10³ the baseline is down an order of magnitude. On `diamonds-diamonds` it does not converge at all: median ESS 6.5 out of 200,000 draws, acceptance 0.000, R-hat 2.400 on all 26 parameters, while both adaptive samplers reach R-hat 1.005.
+At a correlation condition number near 1 the three algorithms are indistinguishable, and adaptation is pure overhead. Around 10³ the baseline is down by a factor of six to twenty-four. On `diamonds-diamonds` it does not converge at all: median ESS 6.5 out of 200,000 draws, acceptance 0.000, R-hat 2.400 on all 26 parameters, while both adaptive samplers reach R-hat 1.005.
 
-Dimension does not explain this. `earnings-earn_height` has **3** parameters and a condition number of 1,172; `bball_drive_event_0` has 8 and a condition number of 1.7. The baseline does 24× worse on the smaller one.
+Dimension does not explain this. `earnings-earn_height` has **3** parameters and a condition number of 1,172, and the baseline gets 4% of AM's effective sample size on it. `bball_drive_event_0` has 8 parameters and a condition number of 1.7, and the baseline gets 97%.
 
 ### Where the baseline wins
 
-On ESS **per second** the picture inverts on exactly the two well-conditioned models. `arma-arma11`: baseline 1,465 ESS/sec against AM's 430, for the same effective sample size at a sixth of the wall clock, because it never forms a covariance. `bball_drive_event_0`: 59.2 against 51.1.
+On ESS **per second** the picture inverts on exactly the two well-conditioned models. `arma-arma11`: baseline 1,465 ESS/sec against AM's 430, for the same effective sample size in a third of the wall clock, because it never forms a covariance. `bball_drive_event_0`: 59.2 against 51.1.
 
 This is why the algorithm table above is sorted by ESS and not by ESS/second. Averaged across models the baseline leads on ESS/second (255 against AM's 211) while failing to converge on two of them - an algorithm that produces no usable samples can top a per-second ranking by being quick about it. The per-second column is worth reading per model, and the model is what decides it.
 
@@ -125,11 +125,11 @@ This is why the algorithm table above is sorted by ESS and not by ESS/second. Av
 
 ![Acceptance rate stability](figures/acceptance_stability.png)
 
-RAM lands between **0.225 and 0.240** on all seven models, spanning 3 to 26 parameters and five orders of magnitude of conditioning, against a target of 0.234. Its standard deviation across models is **0.006**, thirteen times tighter than AM's 0.078.
+RAM lands between **0.225 and 0.240** on all seven models, spanning 3 to 26 parameters and five orders of magnitude of conditioning, against a target of 0.234. Its standard deviation across models is **0.006**, fourteen times tighter than AM's 0.078.
 
 AM has no acceptance target - it applies the `2.38²/d` scaling to whatever empirical covariance it has - and ranges from 0.082 to 0.319. That is not a defect, it is the difference between the two algorithms, and it is what the Robbins-Monro loop in RAM exists to remove.
 
-Both reach the same accuracy, so on this evidence the control loop buys predictability rather than performance: AM's mean error is 0.022 reference SDs against RAM's 0.023, and AM is ahead on ESS on all seven models by 5-15%.
+Both reach the same accuracy, so on this evidence the control loop buys predictability rather than performance: AM's mean error is 0.022 reference SDs against RAM's 0.023, and AM is ahead on ESS on all seven models, though by anything from 0.2% to 24%.
 
 ### Why the accuracy column is in reference SDs
 
