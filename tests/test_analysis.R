@@ -20,7 +20,8 @@ run_analysis_in <- function(dir) {
 # path but would fill the test output with smoother warnings.
 fake_results <- function(models = paste0("model-", 1:5),
                          dims = c(3, 4, 8, 15, 26),
-                         schema = "chainwise-diagnostics-v2") {
+                         schema = "chainwise-diagnostics-v2",
+                         raw_scale = rep(1, length(models))) {
   set.seed(42)
   results <- list()
 
@@ -29,10 +30,15 @@ fake_results <- function(models = paste0("model-", 1:5),
     per_algo <- list()
 
     for (algo in c("AM", "RAM", "RWM_baseline")) {
+      # raw_scale lets a model be put on huge units while its normalised
+      # error stays where every other model's is.
+      normalised <- runif(4, 0.01, 0.5)
       per_algo[[algo]] <- list(
         per_chain = data.frame(
-          rmse = runif(4, 0.01, 0.5),
-          mae = runif(4, 0.01, 0.4),
+          rmse = normalised * raw_scale[i],
+          mae = runif(4, 0.01, 0.4) * raw_scale[i],
+          rmse_normalised = normalised,
+          mae_normalised = runif(4, 0.01, 0.4),
           runtime = runif(4, 0.1, 1),
           acceptance_rate = runif(4, 0.2, 0.3)
         ),
@@ -122,6 +128,34 @@ test_that("the model count is not divided by the chain count", {
   algo_csv <- read.csv(file.path(dir, "benchmark_summary_algorithms.csv"))
   expect_equal(sort(unique(algo_csv$N_models)), 5)
   expect_true(all(algo_csv$N_models == as.integer(algo_csv$N_models)))
+})
+
+# ---------------------------------------------------------------------------
+test_that("one model on huge units cannot dominate the cross-model average", {
+  # The bug this pins: the algorithm summary averaged raw RMSE across models.
+  # Here model-2 is on a scale 10,000 times the others while its normalised
+  # error is drawn from the same distribution as theirs, which is exactly the
+  # earnings-earn_height situation. The aggregate must not notice.
+  dir <- file.path(tempdir(), "rmse_scale")
+  dir.create(dir, showWarnings = FALSE)
+  saveRDS(fake_results(raw_scale = c(1, 1e4, 1, 1, 1)),
+          file.path(dir, "benchmark_results.rds"))
+
+  run_analysis_in(dir)
+
+  algo_csv <- read.csv(file.path(dir, "benchmark_summary_algorithms.csv"))
+  expect_true("Mean_RMSE_normalised" %in% names(algo_csv))
+  expect_true(!"Mean_RMSE" %in% names(algo_csv))
+  # Every per-chain normalised error was drawn from runif(0.01, 0.5), so the
+  # mean of five models' worth has to land inside that range. Averaging the
+  # raw column instead would put it in the hundreds.
+  expect_true(all(algo_csv$Mean_RMSE_normalised > 0.01))
+  expect_true(all(algo_csv$Mean_RMSE_normalised < 0.5))
+
+  # The raw column survives per model, where it is the readable one.
+  summary_csv <- read.csv(file.path(dir, "benchmark_summary_detailed.csv"))
+  expect_gt(max(summary_csv$RMSE), 100)
+  expect_lt(max(summary_csv$RMSE_normalised), 0.5)
 })
 
 # ---------------------------------------------------------------------------

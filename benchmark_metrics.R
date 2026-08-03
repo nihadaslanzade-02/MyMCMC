@@ -13,19 +13,61 @@ library(posterior)
 # RMSE and MAE compare one chain's posterior mean against the reference, so
 # they are genuinely per-chain quantities and are computed inside the chain
 # loop. ESS and R-hat are not: see compute_convergence() below.
-compute_accuracy <- function(samples, reference_means, runtime) {
+#
+# Two versions of each are reported.
+#
+# `rmse` and `mae` are in the parameters' own units. They are the right thing
+# to read for a single model and meaningless to average across models, because
+# the benchmark's posteriors do not share a scale: earnings-earn_height is on
+# a raw dollar scale where a parameter's standard deviation is 9668, while
+# every parameter in diamonds-diamonds sits below 0.33. An unweighted mean
+# RMSE over models is therefore just earnings-earn_height, and the 61.8
+# reported for RAM in the first run was exactly that.
+#
+# `rmse_normalised` and `mae_normalised` divide each parameter's error by that
+# parameter's standard deviation under the reference posterior first, so the
+# unit is "reference posterior standard deviations" and is the same unit in
+# every model. Missing the posterior mean by one full standard deviation
+# scores 1 whether the parameter is measured in dollars or in log-odds. These
+# are the ones to aggregate.
+compute_accuracy <- function(samples, reference_means, runtime,
+                             reference_sds = NULL) {
 
   tryCatch({
     sample_means <- colMeans(samples)
+    error <- sample_means - reference_means
+
+    rmse_normalised <- NA_real_
+    mae_normalised <- NA_real_
+
+    if (!is.null(reference_sds)) {
+      # A parameter that is constant under the reference posterior has no
+      # scale to divide by. Rather than return Inf for the whole model, drop
+      # those coordinates and say so.
+      usable <- is.finite(reference_sds) & reference_sds > 0
+      if (!all(usable)) {
+        warning(sum(!usable), " of ", length(usable), " parameters have a ",
+                "zero or non-finite reference SD and are excluded from the ",
+                "normalised accuracy metrics")
+      }
+      if (any(usable)) {
+        scaled <- error[usable] / reference_sds[usable]
+        rmse_normalised <- sqrt(mean(scaled^2))
+        mae_normalised <- mean(abs(scaled))
+      }
+    }
 
     list(
-      rmse = sqrt(mean((sample_means - reference_means)^2)),
-      mae = mean(abs(sample_means - reference_means)),
+      rmse = sqrt(mean(error^2)),
+      mae = mean(abs(error)),
+      rmse_normalised = rmse_normalised,
+      mae_normalised = mae_normalised,
       runtime = runtime
     )
   }, error = function(e) {
     warning("Error computing accuracy: ", e$message)
-    list(rmse = NA_real_, mae = NA_real_, runtime = runtime)
+    list(rmse = NA_real_, mae = NA_real_, rmse_normalised = NA_real_,
+         mae_normalised = NA_real_, runtime = runtime)
   })
 }
 

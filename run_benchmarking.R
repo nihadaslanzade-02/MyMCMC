@@ -150,6 +150,9 @@ benchmark_model <- function(posterior_name, pdb, algorithms,
   # Initial value (use reference mean)
   initial <- colMeans(ref_matrix)
   reference_means <- colMeans(ref_matrix)
+  # Per-parameter spread under the reference posterior, used to put the
+  # accuracy metrics on a scale that is comparable across models.
+  reference_sds <- apply(ref_matrix, 2, sd)
 
   results <- list()
 
@@ -192,7 +195,8 @@ benchmark_model <- function(posterior_name, pdb, algorithms,
 
       # Per-chain accuracy only. The convergence diagnostics need every chain
       # at once and are computed below, after the loop.
-      accuracy <- compute_accuracy(algo_output$samples, reference_means, runtime)
+      accuracy <- compute_accuracy(algo_output$samples, reference_means, runtime,
+                                   reference_sds)
 
       chain_samples[[length(chain_samples) + 1]] <- algo_output$samples
 

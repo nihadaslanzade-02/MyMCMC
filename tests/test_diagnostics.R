@@ -124,3 +124,57 @@ test_that("accuracy is measured against the reference means", {
   shifted <- compute_accuracy(samples + 5, reference, runtime = 1)
   expect_equal(shifted$rmse, 5, tolerance = 0.05)
 })
+
+# ---------------------------------------------------------------------------
+test_that("normalised accuracy is comparable across models on different scales", {
+  # The bug this pins: RMSE was never scale-normalised, so averaging it over
+  # models reported whichever model had the largest units. In the first run
+  # that was earnings-earn_height, whose parameters are in dollars with
+  # standard deviations up to 9668; every other model sat below 0.5, and the
+  # 61.8 mean RMSE reported for RAM was essentially that one model.
+  reference <- c(0, 0, 0)
+  dollars <- c(9667.9, 144.2, 385.7)     # earnings-earn_height
+  logs <- c(0.1962, 0.0029, 0.0080)      # earnings-log10earn_height
+
+  # A chain whose posterior mean sits exactly half a reference SD high in
+  # every coordinate, on each scale.
+  off_by_half <- function(sds) matrix(rep(0.5 * sds, each = 100), nrow = 100)
+
+  a <- compute_accuracy(off_by_half(dollars), reference, 1, reference_sds = dollars)
+  b <- compute_accuracy(off_by_half(logs), reference, 1, reference_sds = logs)
+
+  # Same error, so the same score - which is the whole point.
+  expect_equal(a$rmse_normalised, 0.5, tolerance = 1e-10)
+  expect_equal(b$rmse_normalised, 0.5, tolerance = 1e-10)
+  expect_equal(a$mae_normalised, 0.5, tolerance = 1e-10)
+
+  # On the raw scale the identical error differs by four orders of magnitude,
+  # which is what made the cross-model average meaningless.
+  expect_gt(a$rmse / b$rmse, 1e4)
+})
+
+# ---------------------------------------------------------------------------
+test_that("a parameter with no spread is excluded rather than returning Inf", {
+  samples <- matrix(rep(c(1, 1, 1), each = 50), nrow = 50)
+
+  expect_warning(
+    compute_accuracy(samples, c(0, 0, 0), 1, reference_sds = c(2, 0, 4)),
+    "zero or non-finite reference SD"
+  )
+
+  acc <- suppressWarnings(
+    compute_accuracy(samples, c(0, 0, 0), 1, reference_sds = c(2, 0, 4))
+  )
+  # Errors of 1/2 and 1/4 SDs on the two usable parameters.
+  expect_equal(acc$rmse_normalised, sqrt(mean(c(0.5, 0.25)^2)), tolerance = 1e-10)
+  expect_true(is.finite(acc$rmse_normalised))
+})
+
+# ---------------------------------------------------------------------------
+test_that("normalised accuracy is absent, not wrong, when no SDs are supplied", {
+  samples <- matrix(rnorm(300), 100, 3)
+  acc <- compute_accuracy(samples, c(0, 0, 0), runtime = 1)
+
+  expect_true(is.na(acc$rmse_normalised))
+  expect_true(is.finite(acc$rmse))
+})

@@ -58,6 +58,10 @@ for (model_name in names(results)) {
       # Averaged over chains, because accuracy and acceptance are per-chain.
       RMSE = mean(unlist(per_chain$rmse), na.rm = TRUE),
       MAE = mean(unlist(per_chain$mae), na.rm = TRUE),
+      # In reference posterior standard deviations, so it means the same
+      # thing in every model. See benchmark_metrics.R.
+      RMSE_normalised = mean(unlist(per_chain$rmse_normalised), na.rm = TRUE),
+      MAE_normalised = mean(unlist(per_chain$mae_normalised), na.rm = TRUE),
       Acceptance = mean(unlist(per_chain$acceptance_rate), na.rm = TRUE),
       Runtime = mean(unlist(per_chain$runtime), na.rm = TRUE),
       # Taken as computed, because these are already all-chains quantities.
@@ -102,10 +106,10 @@ cat(rep("=", 80), "\n", sep = "")
 cat("BENCHMARK RESULTS SUMMARY\n")
 cat(rep("=", 80), "\n\n", sep = "")
 
-print(knitr::kable(summary_df %>% 
-                     select(Model, Algorithm, Dimension, Acceptance, 
-                            ESS_per_sec, RMSE, Runtime) %>%
-                     arrange(Model, Algorithm), 
+print(knitr::kable(summary_df %>%
+                     select(Model, Algorithm, Dimension, Acceptance,
+                            ESS_per_sec, RMSE, RMSE_normalised, Runtime) %>%
+                     arrange(Model, Algorithm),
                    digits = 3, format = "markdown"))
 
 # ============================================================================
@@ -129,7 +133,12 @@ algo_summary <- summary_df %>%
     Mean_ESS = mean(ESS_median, na.rm = TRUE),
     Mean_ESS_per_sec = mean(ESS_per_sec, na.rm = TRUE),
     Worst_Rhat = max(Rhat_max, na.rm = TRUE),
-    Mean_RMSE = mean(RMSE, na.rm = TRUE),
+    # Only the normalised error is averaged across models. The raw one is on
+    # each model's own units, and averaging it reports whichever model has the
+    # largest numbers - here earnings-earn_height, whose parameters are in
+    # dollars. It stays in the per-model table above, where it is readable.
+    Mean_RMSE_normalised = mean(RMSE_normalised, na.rm = TRUE),
+    Worst_RMSE_normalised = max(RMSE_normalised, na.rm = TRUE),
     Mean_Runtime = mean(Runtime, na.rm = TRUE),
     .groups = "drop"
   ) %>%
@@ -222,8 +231,13 @@ p2 <- ggplot(summary_df, aes(x = Algorithm, y = ESS_per_sec, fill = Algorithm)) 
 ggsave("figures/ess_comparison.pdf", p2, width = 8, height = 6)
 ggsave("figures/ess_comparison.png", p2, width = 8, height = 6, dpi = 300)
 
-# Figure 3: RMSE vs Dimension
-p3 <- ggplot(summary_df, aes(x = Dimension, y = RMSE, color = Algorithm, shape = Algorithm)) +
+# Figure 3: accuracy vs dimension.
+#
+# Normalised, because this figure puts every model on one pair of axes. On the
+# raw scale the y axis is dominated by whichever model has the largest units
+# and the comparison across dimensions is unreadable.
+p3 <- ggplot(summary_df, aes(x = Dimension, y = RMSE_normalised,
+                             color = Algorithm, shape = Algorithm)) +
   geom_point(size = 3, alpha = 0.7) +
   # A loess band used to sit here. With one point per model there are only
   # a handful per algorithm, and loess replies "span too small, fewer data
@@ -235,8 +249,8 @@ p3 <- ggplot(summary_df, aes(x = Dimension, y = RMSE, color = Algorithm, shape =
   scale_y_log10() +
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Accuracy vs Model Dimension",
-       subtitle = "Root Mean Squared Error compared to reference posterior",
-       y = "RMSE (log₁₀ scale)",
+       subtitle = paste("Posterior mean error in reference posterior SDs.", coverage),
+       y = "RMSE (reference posterior SDs, log₁₀ scale)",
        x = "Number of Parameters",
        color = "Algorithm",
        shape = "Algorithm") +
