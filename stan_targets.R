@@ -30,6 +30,8 @@
 #   reference_sd    posterior SD of each constrained parameter
 #   sampling_scale  per-coordinate SD in the SAMPLING space, which is what a
 #                   non-adaptive proposal has to be scaled by
+#   condition       condition number of the reference posterior's CORRELATION
+#                   matrix - see below
 #   to_constrained  function(draws matrix) -> matrix on the constrained scale
 #   to_unconstrained function(constrained vector) -> sampling-space vector
 #   init            function() -> one starting value, drawn independently
@@ -66,6 +68,23 @@
 # For the surrogate the two spaces coincide and to_constrained is the
 # identity. For bridgestan they do not, and dimension is the unconstrained
 # count while param_names describes the constrained output.
+#
+# ----------------------------------------------------------------------------
+# Why the condition number is recorded
+# ----------------------------------------------------------------------------
+# The correlation matrix, not the covariance. The non-adaptive baseline is
+# given each parameter's marginal scale, so scale is not what it is missing;
+# what it cannot represent is the correlation between parameters. The
+# condition number of the correlation matrix is exactly how much of that is
+# left, and it is the variable that predicts what adaptation is worth. Across
+# these posteriors it has nothing to do with dimension: arma-arma11 has 4
+# parameters and a correlation condition number of 1.7, while
+# earnings-earn_height has 3 and 1,214.
+reference_condition <- function(ref) {
+  if (ncol(ref) < 2) return(1)
+  suppressWarnings(tryCatch(kappa(cor(ref), exact = TRUE),
+                            error = function(e) NA_real_))
+}
 
 # ============================================================================
 # GAUSSIAN SURROGATE
@@ -102,6 +121,7 @@ gaussian_surrogate_target <- function(reference_draws) {
     reference_mean = mu,
     reference_sd = sds,
     sampling_scale = sds,          # the two spaces coincide here
+    condition = reference_condition(ref),
     to_constrained = function(draws) draws,
     to_unconstrained = function(theta) as.numeric(theta),
     init = function() as.numeric(ref[sample.int(nrow(ref), 1L), ])
@@ -239,6 +259,13 @@ bridgestan_target <- function(posterior_name, reference_draws, pdb,
     reference_mean = colMeans(ref),
     reference_sd = apply(ref, 2, sd),
     sampling_scale = unc_sd,
+    # Measured in the unconstrained space, because that is where the sampler
+    # moves and where the baseline's diagonal proposal has to cope. It is also
+    # the only one that is finite here: a simplex makes the constrained
+    # covariance exactly rank deficient, which is why the two bball models
+    # report a constrained condition number around 1e17 and 8 parameters
+    # against 6 unconstrained ones.
+    condition = reference_condition(unc_sample),
     to_constrained = function(draws) {
       out <- t(apply(draws, 1, function(row) {
         model$param_constrain(row, include_tp = FALSE, include_gq = FALSE)

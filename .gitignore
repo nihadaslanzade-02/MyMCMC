@@ -26,7 +26,15 @@ Thumbs.db
 desktop.ini
 ~$*
 
-# Note on the .rds files: benchmark_config.rds, benchmark_results*.rds and
+# The mid-run checkpoint. Written every 3 models so a crash does not cost the
+# whole sweep, and of no use once the run finishes - it is a strictly smaller
+# copy of benchmark_results.rds. It used to be tracked, and having a plausible
+# looking half-finished results file sitting in the repo is what made it
+# possible for analyze_results.R to read it by mistake for six models instead
+# of seven.
+benchmark_results_partial.rds
+
+# Note on the other .rds files: benchmark_config.rds, benchmark_results.rds and
 # posteriordb_discovery.rds ARE tracked on purpose. They are the saved output of
 # a benchmark run that takes network access and real time to reproduce, so they
 # stay in the repo as the evidence behind the figures and summary tables.

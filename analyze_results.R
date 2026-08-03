@@ -61,6 +61,10 @@ for (model_name in names(results)) {
       # through a Gaussian fitted to its reference draws. Carried into every
       # table so the two can never be read as the same experiment.
       Target = attr(model_res, "target_kind") %||% "unknown",
+      # Condition number of the reference posterior's correlation matrix.
+      # The baseline is given the marginal scales, so this is what is left for
+      # adaptation to earn, and it is unrelated to dimension.
+      Condition = attr(model_res, "condition") %||% NA_real_,
       # Averaged over chains, because accuracy and acceptance are per-chain.
       RMSE = mean(unlist(per_chain$rmse), na.rm = TRUE),
       MAE = mean(unlist(per_chain$mae), na.rm = TRUE),
@@ -123,8 +127,8 @@ cat("BENCHMARK RESULTS SUMMARY\n")
 cat(rep("=", 80), "\n\n", sep = "")
 
 print(knitr::kable(summary_df %>%
-                     select(Model, Algorithm, Target, Dimension, Acceptance,
-                            ESS_median, ESS_per_sec, Rhat_max,
+                     select(Model, Algorithm, Target, Dimension, Condition,
+                            Acceptance, ESS_median, ESS_per_sec, Rhat_max,
                             RMSE, RMSE_normalised, Runtime) %>%
                      arrange(Model, Algorithm),
                    digits = 3, format = "markdown"))
@@ -286,8 +290,10 @@ p4 <- ggplot(summary_df, aes(x = Dimension, y = Acceptance,
   geom_hline(yintercept = 0.234, linetype = "dashed", color = "gray50", linewidth = 0.8) +
   annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0.20, ymax = 0.27, 
            alpha = 0.1, fill = "blue") +
-  annotate("text", x = 25, y = 0.28, label = "Optimal range", 
-           color = "gray40", size = 3.5) +
+  # Placed from the data rather than at a hardcoded x = 25, which only sat
+  # inside the panel while the widest model happened to have 26 parameters.
+  annotate("text", x = max(summary_df$Dimension, na.rm = TRUE) * 0.85, y = 0.30,
+           label = "Optimal range", color = "gray40", size = 3.5) +
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
   labs(title = "Acceptance Rate Stability Across Dimensions",
@@ -302,6 +308,34 @@ p4 <- ggplot(summary_df, aes(x = Dimension, y = Acceptance,
 
 ggsave("figures/acceptance_stability.pdf", p4, width = 10, height = 6)
 ggsave("figures/acceptance_stability.png", p4, width = 10, height = 6, dpi = 300)
+
+# Figure 5: what the adaptation is actually worth.
+#
+# The baseline is handed each parameter's marginal scale, so the only thing it
+# cannot represent is the correlation between parameters. Plotting ESS against
+# the correlation matrix's condition number puts the comparison against the
+# variable that explains it. Dimension does not: arma-arma11 has 4 parameters
+# and a condition number of 1.7, earnings-earn_height has 3 and 1,214.
+p5 <- ggplot(summary_df, aes(x = Condition, y = ESS_median,
+                             color = Algorithm, shape = Algorithm)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_line(alpha = 0.5) +
+  scale_x_log10(labels = scales::comma) +
+  scale_y_log10(labels = scales::comma) +
+  scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8",
+                                "RWM_baseline" = "#4DAF4A")) +
+  labs(title = "What Adaptation Buys, Against How Correlated the Posterior Is",
+       subtitle = paste("Condition number of the reference correlation matrix.", coverage),
+       y = "Median ESS (log₁₀ scale)",
+       x = "Correlation condition number (log₁₀ scale)",
+       color = "Algorithm",
+       shape = "Algorithm") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))
+
+ggsave("figures/ess_conditioning.pdf", p5, width = 10, height = 6)
+ggsave("figures/ess_conditioning.png", p5, width = 10, height = 6, dpi = 300)
 
 # ============================================================================
 # 6. SAVE OUTPUTS
@@ -321,6 +355,7 @@ cat("  - figures/acceptance_rates.pdf/png\n")
 cat("  - figures/ess_comparison.pdf/png\n")
 cat("  - figures/rmse_dimension.pdf/png\n")
 cat("  - figures/acceptance_stability.pdf/png\n")
+cat("  - figures/ess_conditioning.pdf/png\n")
 cat("  - benchmark_summary_detailed.csv\n")
 cat("  - benchmark_summary_algorithms.csv\n")
 cat("  - benchmark_summary_by_dimension.csv\n")

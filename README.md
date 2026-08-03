@@ -169,21 +169,22 @@ MyMCMC/
 ├── hmc_leapfrog.R                   # Alg 1.5 - HMC, leapfrog integrator, energy diagnostics
 ├── adaptive_algorithms.R            # AM, RAM, and the non-adaptive RWM baseline
 │
-├── benchmarking_posteriordb.R       # stage 1 - discover, extract dimensions, select, configure
+├── benchmarking_posteriordb.R       # stage 1 - discover, extract dimensions, select
+├── stan_targets.R                   # Stan log densities and Gaussian surrogates, one interface
 ├── run_benchmarking.R               # stage 2 - build targets, run chains
 ├── benchmark_metrics.R              # accuracy per chain, convergence across chains
 ├── analyze_results.R                # stage 3 - aggregate, tabulate, plot
 │
-├── tests/                           # 22 tests, base-R runner, no framework needed
+├── tests/                           # 44 tests, base-R runner, no framework needed
 │
 ├── posteriordb_discovery.rds        # 47 posteriors with references, with dimensions
 ├── benchmark_config.rds             # selected models + reference draws (9.4 MB, regenerable)
-├── benchmark_results.rds            # 7 models complete, predates the diagnostics fix
-├── benchmark_results_partial.rds    # 6-model checkpoint written mid-run
+├── benchmark_results.rds            # the run behind the figures below
 ├── benchmark_summary_*.csv          # aggregated tables
 ├── benchmark_best_per_model.csv
 │
 ├── figures/                         # 4 figures, PDF + PNG at 300 dpi
+├── stan_cache/                      # compiled Stan models (gitignored, rebuilt on demand)
 ├── .github/workflows/ci.yml         # parse every script, run the suite on R 4.3 / 4.4 / release
 └── LICENSE
 ```
@@ -196,26 +197,44 @@ MyMCMC/
 Rscript tests/run_tests.R
 ```
 
-22 tests, a few seconds, no network and no benchmark data. The runner is about
-80 lines of base R providing `test_that` and the `expect_*` calls, because the
-samplers deliberately depend on nothing beyond base R and MASS and the suite
-keeps that property: its only package is `posterior`, which the diagnostics
-under test already require.
+44 tests, about a minute, no network and no benchmark data. The runner is
+roughly 100 lines of base R providing `test_that`, the `expect_*` calls and a
+`skip_if`, because the samplers deliberately depend on nothing beyond base R
+and MASS and the suite keeps that property: its only package is `posterior`,
+which the diagnostics under test already require.
 
-The convergence tests are the ones worth reading. They build chains whose
-correct answers are known by construction - independent draws for the healthy
-case, chains stuck in separate places for the unhealthy one - so a failure
-means the diagnostic is wrong rather than that an expected value was copied
-from a previous run.
+Three groups are worth reading.
 
-CI runs the suite on R 4.3, 4.4 and release, and parses every script first,
-since the benchmark stages cannot run there.
+- **The convergence tests** build chains whose correct answers are known by
+  construction - independent draws for the healthy case, chains stuck in
+  separate places for the unhealthy one - so a failure means the diagnostic is
+  wrong rather than that an expected value was copied from a previous run.
+- **The target tests** check the Gaussian surrogate's log density against the
+  multivariate normal formula written out independently, and round trip a
+  parameter vector through Stan's unconstraining transform and back.
+- **The sweep tests** run the whole of stage 2 on two synthetic posteriors,
+  including that the same seed reproduces a run exactly and a different one
+  does not.
+
+One test needs a C++ toolchain and the BridgeStan sources and skips with its
+reason printed when they are absent, which is the case in CI. CI runs the
+suite on R 4.3, 4.4 and release, and parses every script first, since the
+benchmark stages cannot run there.
 
 ---
 
 ## Reproducing
 
-**Requirements.** R 4.0+. The samplers need nothing beyond base R and MASS. The benchmark additionally needs `posteriordb`, `posterior`, `dplyr`, `ggplot2`, `tidyr`, `knitr`, `jsonlite` and network access - stage 1 pulls reference posteriors from GitHub.
+**Requirements.** R 4.0+. The samplers need nothing beyond base R and MASS. The benchmark additionally needs `posteriordb`, `posterior`, `dplyr`, `ggplot2`, `tidyr`, `knitr` and `jsonlite`, plus network access for stage 1, which pulls the reference posteriors from GitHub.
+
+Sampling the real Stan posteriors also needs `bridgestan`, a C++ toolchain, and the BridgeStan sources:
+
+```r
+install.packages("bridgestan")
+bridgestan:::get_bridgestan_path(download = TRUE)   # ~200 MB, Stan included
+```
+
+On Windows the toolchain is Rtools, and its `usr/bin` and `x86_64-w64-mingw32.static.posix/bin` have to be on `PATH` before R starts - `make` is not there by default. `stan_targets.R` reports which of these is missing rather than failing obscurely, and `run_benchmarking.R` falls back to the Gaussian surrogate with a note when any of it is absent, so the benchmark runs either way. The first Stan model compiled takes about three minutes because it builds the Stan library; after that each model is roughly 25 seconds, and re-runs load the cached shared library in under two.
 
 Using a sampler on its own - no benchmark infrastructure required:
 
@@ -228,13 +247,15 @@ fit <- random_walk_metropolis(
   target_log_density = target_log_density,
   proposal_sd        = 2.38,
   initial_value      = c(0, 0),
-  n_iterations       = 10000,
+  n_iterations       = 10000,   # total chain length, burn_in included
   burn_in            = 1000
 )
 
 fit$acceptance_rate
-colMeans(fit$samples)
+colMeans(fit$samples)           # 9000 draws
 ```
+
+`n_iterations` is the whole chain in every sampler here, with the leading `burn_in` discarded from it. The two families used to disagree about this; see the note at the top of [`adaptive_algorithms.R`](adaptive_algorithms.R).
 
 Comparing the adaptive samplers on a target of your own:
 

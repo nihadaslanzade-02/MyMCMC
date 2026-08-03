@@ -60,6 +60,8 @@ fake_results <- function(models = paste0("model-", 1:5),
     }
 
     attr(per_algo, "dimension") <- d
+    attr(per_algo, "target_kind") <- "gaussian-surrogate"
+    attr(per_algo, "condition") <- 10^i
     results[[models[i]]] <- per_algo
   }
 
@@ -167,7 +169,14 @@ test_that("figures are written and their subtitles follow the data", {
   run_analysis_in(dir)
 
   for (f in c("acceptance_rates", "ess_comparison", "rmse_dimension",
-              "acceptance_stability")) {
+              "acceptance_stability", "ess_conditioning")) {
     expect_true(file.exists(file.path(dir, "figures", paste0(f, ".png"))))
   }
+
+  # Which target produced each model, and how correlated that posterior is,
+  # both travel into the tables. A figure that mixed real Stan posteriors with
+  # Gaussian surrogates and did not say so would be the easiest mistake here.
+  summary_csv <- read.csv(file.path(dir, "benchmark_summary_detailed.csv"))
+  expect_true(all(summary_csv$Target == "gaussian-surrogate"))
+  expect_equal(sort(unique(summary_csv$Condition)), 10^(1:5))
 })

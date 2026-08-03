@@ -104,6 +104,8 @@ benchmark_model <- function(posterior_name, model_entry, pdb, algorithms,
   cat("  Target: ", target$kind, ", ", n_params, " parameters",
       if (target$dimension != n_params)
         paste0(" (", target$dimension, " unconstrained)") else "",
+      ", correlation condition number ",
+      format(target$condition, digits = 4, scientific = FALSE, big.mark = ","),
       "\n", sep = "")
 
   results <- list()
@@ -186,6 +188,9 @@ benchmark_model <- function(posterior_name, model_entry, pdb, algorithms,
   attr(results, "dimension") <- n_params
   attr(results, "sampling_dimension") <- target$dimension
   attr(results, "target_kind") <- target$kind
+  # Recorded because it, and not the dimension, is what predicts how much the
+  # adaptation is worth on a given posterior.
+  attr(results, "condition") <- target$condition
   attr(results, "n_chains") <- settings$n_chains
   attr(results, "n_iterations") <- n_iterations
   attr(results, "burn_in") <- burn_in
@@ -193,117 +198,143 @@ benchmark_model <- function(posterior_name, model_entry, pdb, algorithms,
   results
 }
 
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
+# The sweep is a function, called at the bottom of the file only when the
+# option below is unset. That way sourcing this script gives a test access to
+# benchmark_model() and chain_seed() without launching a run that takes half
+# an hour, while `Rscript run_benchmarking.R` still does the whole thing -
+# Rscript sets no options.
 
-cat("\n")
-cat(strrep("=", 70), "\n", sep = "")
-cat("ADAPTIVE MCMC BENCHMARKING WITH POSTERIORDB\n")
-cat(strrep("=", 70), "\n\n", sep = "")
+run_benchmark_sweep <- function(settings = BENCHMARK_CONFIG,
+                                algorithms = ALGORITHMS,
+                                config_file = "benchmark_config.rds",
+                                output_file = "benchmark_results.rds",
+                                checkpoint_file = "benchmark_results_partial.rds") {
 
-cat("Loading configuration...\n")
-config <- readRDS("benchmark_config.rds")
-selected_models <- names(config$models)
+  cat("\n")
+  cat(strrep("=", 70), "\n", sep = "")
+  cat("ADAPTIVE MCMC BENCHMARKING WITH POSTERIORDB\n")
+  cat(strrep("=", 70), "\n\n", sep = "")
 
-if (length(selected_models) == 0) {
-  stop("benchmark_config.rds holds no models. Run benchmarking_posteriordb.R first.")
-}
+  cat("Loading configuration...\n")
+  config <- readRDS(config_file)
+  selected_models <- names(config$models)
 
-cat("Found", length(selected_models), "models to benchmark\n")
-cat("Testing", length(ALGORITHMS), "algorithms:",
-    paste(names(ALGORITHMS), collapse = ", "), "\n")
-
-cat("\nBenchmark settings:\n")
-cat("  Iterations (total): ", BENCHMARK_CONFIG$n_iterations, "\n", sep = "")
-cat("  Burn-in:            ",
-    floor(BENCHMARK_CONFIG$n_iterations * BENCHMARK_CONFIG$burn_in_fraction),
-    "\n", sep = "")
-cat("  Chains:             ", BENCHMARK_CONFIG$n_chains, "\n", sep = "")
-cat("  Max dimension:      ", BENCHMARK_CONFIG$max_dimension, "\n", sep = "")
-cat("  Target:             ", BENCHMARK_CONFIG$target_method, "\n", sep = "")
-cat("  Seed:               ", BENCHMARK_CONFIG$seed, "\n", sep = "")
-
-# Only opened if a target needs the Stan source; the reference draws come from
-# the config file.
-pdb <- NULL
-if (BENCHMARK_CONFIG$target_method != "gaussian") {
-  pdb <- tryCatch(posteriordb::pdb_github(), error = function(e) {
-    cat("\nCould not reach posteriordb (", conditionMessage(e), ").\n", sep = "")
-    cat("Falling back to the Gaussian surrogate for every model.\n")
-    BENCHMARK_CONFIG$target_method <<- "gaussian"
-    NULL
-  })
-}
-
-all_results <- list()
-successful_models <- 0
-failed_models <- 0
-
-for (i in seq_along(selected_models)) {
-  model_name <- selected_models[i]
-  cat("\n[", i, "/", length(selected_models), "] ", sep = "")
-
-  result <- tryCatch({
-    benchmark_model(model_name, config$models[[model_name]], pdb, ALGORITHMS,
-                    model_index = i, settings = BENCHMARK_CONFIG)
-  }, error = function(e) {
-    cat("FATAL ERROR with", model_name, ":", conditionMessage(e), "\n")
-    NULL
-  })
-
-  if (!is.null(result) && length(result) > 0) {
-    all_results[[model_name]] <- result
-    successful_models <- successful_models + 1
-  } else {
-    failed_models <- failed_models + 1
+  if (length(selected_models) == 0) {
+    stop(config_file, " holds no models. Run benchmarking_posteriordb.R first.")
   }
 
-  # Checkpoint, in the same envelope as the final file so it can be inspected
-  # with the same code.
-  if (i %% 3 == 0) {
-    saveRDS(list(schema = "chainwise-diagnostics-v2", results = all_results,
-                 config = BENCHMARK_CONFIG, partial = TRUE,
-                 models_done = i, models_total = length(selected_models)),
-            "benchmark_results_partial.rds")
-    cat("\n  [Saved intermediate results]\n")
+  cat("Found", length(selected_models), "models to benchmark\n")
+  cat("Testing", length(algorithms), "algorithms:",
+      paste(names(algorithms), collapse = ", "), "\n")
+
+  # format() rather than a bare cat(), which renders 100000 as 1e+05.
+  pretty <- function(x) format(x, scientific = FALSE, big.mark = ",")
+
+  cat("\nBenchmark settings:\n")
+  cat("  Iterations (total): ", pretty(settings$n_iterations), "\n", sep = "")
+  cat("  Burn-in:            ",
+      pretty(floor(settings$n_iterations * settings$burn_in_fraction)),
+      "\n", sep = "")
+  cat("  Chains:             ", settings$n_chains, "\n", sep = "")
+  cat("  Max dimension:      ", settings$max_dimension, "\n", sep = "")
+  cat("  Target:             ", settings$target_method, "\n", sep = "")
+  cat("  Seed:               ", settings$seed, "\n", sep = "")
+
+  # Opened only if a target needs the Stan source. The reference draws
+  # themselves come from the config file, so a Gaussian run needs no network
+  # and a bridgestan run needs it only for models not already in stan_cache/.
+  pdb <- NULL
+  if (settings$target_method != "gaussian") {
+    pdb <- tryCatch(posteriordb::pdb_github(), error = function(e) {
+      cat("\nCould not reach posteriordb (", conditionMessage(e), ").\n", sep = "")
+      cat("Anything not already cached will use the Gaussian surrogate.\n")
+      NULL
+    })
   }
+
+  all_results <- list()
+  successful_models <- 0
+  failed_models <- 0
+
+  for (i in seq_along(selected_models)) {
+    model_name <- selected_models[i]
+    cat("\n[", i, "/", length(selected_models), "] ", sep = "")
+
+    result <- tryCatch({
+      benchmark_model(model_name, config$models[[model_name]], pdb, algorithms,
+                      model_index = i, settings = settings)
+    }, error = function(e) {
+      cat("FATAL ERROR with", model_name, ":", conditionMessage(e), "\n")
+      NULL
+    })
+
+    if (!is.null(result) && length(result) > 0) {
+      all_results[[model_name]] <- result
+      successful_models <- successful_models + 1
+    } else {
+      failed_models <- failed_models + 1
+    }
+
+    # Checkpoint, in the same envelope as the final file so it can be read
+    # with the same code, and flagged partial so it cannot be mistaken for one.
+    if (i %% 3 == 0) {
+      saveRDS(list(schema = "chainwise-diagnostics-v2", results = all_results,
+                   config = settings, partial = TRUE,
+                   models_done = i, models_total = length(selected_models)),
+              checkpoint_file)
+      cat("\n  [Saved intermediate results]\n")
+    }
+  }
+
+  # ==========================================================================
+  # SAVE FINAL RESULTS
+  # ==========================================================================
+
+  cat("\n\n")
+  cat(strrep("=", 70), "\n", sep = "")
+  cat("BENCHMARKING COMPLETE\n")
+  cat(strrep("=", 70), "\n", sep = "")
+  cat("Successful models:", successful_models, "\n")
+  cat("Failed/skipped models:", failed_models, "\n")
+
+  target_kinds <- vapply(all_results, function(r) attr(r, "target_kind"),
+                         character(1))
+  if (length(target_kinds)) {
+    counts <- table(target_kinds)
+    cat("Targets used:", paste(names(counts), counts, sep = " x ",
+                               collapse = ", "), "\n")
+  }
+
+  # `schema` marks results produced by the corrected diagnostics. Files written
+  # before that fix carry per-chain ESS and R-hat values that are not what
+  # their names say, so analyze_results.R checks for this marker and refuses to
+  # plot a file without it rather than silently charting the old numbers.
+  final_output <- list(
+    schema = "chainwise-diagnostics-v2",
+    results = all_results,
+    config = settings,
+    algorithms = names(algorithms),
+    target_kinds = target_kinds,
+    timestamp = Sys.time(),
+    n_successful = successful_models,
+    n_failed = failed_models,
+    selected_models = selected_models,
+    session = list(r_version = R.version.string,
+                   posterior = as.character(utils::packageVersion("posterior")))
+  )
+
+  saveRDS(final_output, output_file)
+
+  cat("\nResults saved to: ", output_file, "\n", sep = "")
+  cat("\nDone!\n")
+
+  invisible(final_output)
 }
 
-# ============================================================================
-# SAVE FINAL RESULTS
-# ============================================================================
-
-cat("\n\n")
-cat(strrep("=", 70), "\n", sep = "")
-cat("BENCHMARKING COMPLETE\n")
-cat(strrep("=", 70), "\n", sep = "")
-cat("Successful models:", successful_models, "\n")
-cat("Failed/skipped models:", failed_models, "\n")
-
-target_kinds <- vapply(all_results, function(r) attr(r, "target_kind"), character(1))
-cat("Targets used:", paste(names(table(target_kinds)), table(target_kinds),
-                           sep = " x ", collapse = ", "), "\n")
-
-# `schema` marks results produced by the corrected diagnostics. Files written
-# before that fix carry per-chain ESS and R-hat values that are not what their
-# names say, so analyze_results.R checks for this marker and refuses to plot a
-# file without it rather than silently charting the old numbers.
-final_output <- list(
-  schema = "chainwise-diagnostics-v2",
-  results = all_results,
-  config = BENCHMARK_CONFIG,
-  algorithms = names(ALGORITHMS),
-  target_kinds = target_kinds,
-  timestamp = Sys.time(),
-  n_successful = successful_models,
-  n_failed = failed_models,
-  selected_models = selected_models,
-  session = list(r_version = R.version.string,
-                 posterior = as.character(utils::packageVersion("posterior")))
-)
-
-saveRDS(final_output, "benchmark_results.rds")
-
-cat("\nResults saved to: benchmark_results.rds\n")
-cat("\nDone!\n")
+if (!isTRUE(getOption("mymcmc.source_only"))) {
+  run_benchmark_sweep()
+}
