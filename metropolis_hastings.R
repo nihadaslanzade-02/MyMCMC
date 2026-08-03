@@ -6,8 +6,8 @@
 #   proposal_sample: function to sample from q(·|x)
 #   proposal_log_density: log of proposal density q(y|x)
 #   initial_value: starting value for the chain
-#   n_iterations: number of MCMC iterations
-#   burn_in: number of burn-in iterations to discard
+#   n_iterations: TOTAL number of iterations to run, burn_in included
+#   burn_in: number of leading iterations to discard, must be < n_iterations
 #
 # Output:
 #   samples: matrix of MCMC samples (after burn-in)
@@ -19,22 +19,29 @@ metropolis_hastings <- function(target_log_density,
                                 initial_value,
                                 n_iterations,
                                 burn_in = 0) {
-  
+
   # Determine dimension
   d <- length(initial_value)
-  
+
+  # n_iterations is the whole chain, burn_in comes out of it. The guard is
+  # repeated verbatim in each algorithm file rather than factored out, so that
+  # any one of them can still be sourced on its own.
+  if (n_iterations < 2 || burn_in < 0 || burn_in >= n_iterations) {
+    stop("need n_iterations >= 2 and 0 <= burn_in < n_iterations; got ",
+         "n_iterations = ", n_iterations, ", burn_in = ", burn_in)
+  }
+
   # Initialize storage
-  total_iterations <- n_iterations + burn_in
-  chain <- matrix(nrow = total_iterations, ncol = d)
-  accepted <- numeric(total_iterations)
-  
+  chain <- matrix(nrow = n_iterations, ncol = d)
+  accepted <- numeric(n_iterations)
+
   # Initialize chain
   current_state <- initial_value
   current_log_density <- target_log_density(current_state)
   chain[1, ] <- current_state
-  
+
   # Main MCMC loop
-  for (t in 2:total_iterations) {
+  for (t in 2:n_iterations) {
     # Propose new state
     proposed_state <- proposal_sample(current_state)
     
@@ -59,16 +66,12 @@ metropolis_hastings <- function(target_log_density,
     # Store current state
     chain[t, ] <- current_state
   }
-  
-  # Remove burn-in period
-  if (burn_in > 0) {
-    samples <- chain[(burn_in + 1):total_iterations, , drop = FALSE]
-    acceptance_rate <- mean(accepted[(burn_in + 1):total_iterations])
-  } else {
-    samples <- chain
-    acceptance_rate <- mean(accepted[-1])  # Exclude first iteration
-  }
-  
+
+  # Remove burn-in period. Iteration 1 is the initial value and had no
+  # proposal, so it never counts towards the acceptance rate.
+  samples <- chain[(burn_in + 1):n_iterations, , drop = FALSE]
+  acceptance_rate <- mean(accepted[max(burn_in + 1, 2):n_iterations])
+
   return(list(
     samples = samples,
     acceptance_rate = acceptance_rate,
@@ -85,8 +88,8 @@ metropolis_hastings <- function(target_log_density,
 #   target_log_density: log of target distribution π(x) (up to constant)
 #   proposal_sd: standard deviation for normal random walk proposal
 #   initial_value: starting value for the chain
-#   n_iterations: number of MCMC iterations
-#   burn_in: number of burn-in iterations to discard
+#   n_iterations: TOTAL number of iterations to run, burn_in included
+#   burn_in: number of leading iterations to discard, must be < n_iterations
 #
 # Output:
 #   samples: matrix of MCMC samples (after burn-in)
@@ -97,10 +100,19 @@ random_walk_metropolis <- function(target_log_density,
                                    initial_value,
                                    n_iterations,
                                    burn_in = 0) {
-  
+
   # Determine dimension
   d <- length(initial_value)
-  
+
+  # n_iterations is the whole chain, burn_in comes out of it. The guard is
+  # repeated verbatim in each algorithm file rather than factored out, so that
+  # any one of them can still be sourced on its own.
+  if (n_iterations < 2 || burn_in < 0 || burn_in >= n_iterations) {
+    stop("need n_iterations >= 2 and 0 <= burn_in < n_iterations; got ",
+         "n_iterations = ", n_iterations, ", burn_in = ", burn_in)
+  }
+
+
   # Create proposal covariance matrix
   # Scale proposal_sd by 1/sqrt(d) for high dimensions (Roberts et al., 1997)
   if (d > 10) {
@@ -109,19 +121,18 @@ random_walk_metropolis <- function(target_log_density,
     scaled_sd <- proposal_sd
   }
   proposal_cov <- diag(scaled_sd^2, d)
-  
+
   # Initialize storage
-  total_iterations <- n_iterations + burn_in
-  chain <- matrix(nrow = total_iterations, ncol = d)
-  accepted <- numeric(total_iterations)
-  
+  chain <- matrix(nrow = n_iterations, ncol = d)
+  accepted <- numeric(n_iterations)
+
   # Initialize chain
   current_state <- initial_value
   current_log_density <- target_log_density(current_state)
   chain[1, ] <- current_state
-  
+
   # Main MCMC loop
-  for (t in 2:total_iterations) {
+  for (t in 2:n_iterations) {
     # Propose new state (random walk)
     innovation <- rnorm(d, mean = 0, sd = scaled_sd)
     proposed_state <- current_state + innovation
@@ -145,16 +156,12 @@ random_walk_metropolis <- function(target_log_density,
     # Store current state
     chain[t, ] <- current_state
   }
-  
-  # Remove burn-in period
-  if (burn_in > 0) {
-    samples <- chain[(burn_in + 1):total_iterations, , drop = FALSE]
-    acceptance_rate <- mean(accepted[(burn_in + 1):total_iterations])
-  } else {
-    samples <- chain
-    acceptance_rate <- mean(accepted[-1])
-  }
-  
+
+  # Remove burn-in period. Iteration 1 is the initial value and had no
+  # proposal, so it never counts towards the acceptance rate.
+  samples <- chain[(burn_in + 1):n_iterations, , drop = FALSE]
+  acceptance_rate <- mean(accepted[max(burn_in + 1, 2):n_iterations])
+
   # Print tuning recommendation based on acceptance rate
   if (acceptance_rate < 0.15) {
     cat("Warning: Low acceptance rate (", round(acceptance_rate, 3), 

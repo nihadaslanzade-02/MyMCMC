@@ -8,8 +8,8 @@
 #   step_size: leapfrog step size ε
 #   n_leapfrog_steps: number of leapfrog steps L
 #   initial_value: starting value for the chain
-#   n_iterations: number of HMC iterations
-#   burn_in: number of burn-in iterations to discard
+#   n_iterations: TOTAL number of iterations to run, burn_in included
+#   burn_in: number of leading iterations to discard, must be < n_iterations
 #
 # Output:
 #   samples: matrix of HMC samples (after burn-in)
@@ -24,30 +24,37 @@ hamiltonian_monte_carlo <- function(target_log_density,
                                     initial_value,
                                     n_iterations,
                                     burn_in = 0) {
-  
+
   # Determine dimension
   d <- length(initial_value)
-  
+
+  # n_iterations is the whole chain, burn_in comes out of it. The guard is
+  # repeated verbatim in each algorithm file rather than factored out, so that
+  # any one of them can still be sourced on its own.
+  if (n_iterations < 2 || burn_in < 0 || burn_in >= n_iterations) {
+    stop("need n_iterations >= 2 and 0 <= burn_in < n_iterations; got ",
+         "n_iterations = ", n_iterations, ", burn_in = ", burn_in)
+  }
+
   # Set default mass matrix (identity)
   if (is.null(mass_matrix)) {
     mass_matrix <- diag(d)
   }
-  
+
   # Compute inverse mass matrix for kinetic energy calculation
   mass_matrix_inv <- solve(mass_matrix)
-  
+
   # Initialize storage
-  total_iterations <- n_iterations + burn_in
-  chain <- matrix(nrow = total_iterations, ncol = d)
-  accepted <- numeric(total_iterations)
-  energy_changes <- numeric(total_iterations)
-  
+  chain <- matrix(nrow = n_iterations, ncol = d)
+  accepted <- numeric(n_iterations)
+  energy_changes <- numeric(n_iterations)
+
   # Initialize chain
   current_q <- initial_value
   chain[1, ] <- current_q
-  
+
   # Main HMC loop
-  for (t in 2:total_iterations) {
+  for (t in 2:n_iterations) {
     
     # Step 1: Sample momentum from N(0, M)
     current_p <- as.vector(mvrnorm_simple(mass_matrix))
@@ -100,17 +107,15 @@ hamiltonian_monte_carlo <- function(target_log_density,
     chain[t, ] <- current_q
   }
   
-  # Remove burn-in period
-  if (burn_in > 0) {
-    samples <- chain[(burn_in + 1):total_iterations, , drop = FALSE]
-    acceptance_rate <- mean(accepted[(burn_in + 1):total_iterations])
-    final_energy_changes <- energy_changes[(burn_in + 1):total_iterations]
-  } else {
-    samples <- chain
-    acceptance_rate <- mean(accepted[-1])
-    final_energy_changes <- energy_changes[-1]
-  }
-  
+  # Remove burn-in period. Iteration 1 is the initial value: it had no
+  # trajectory, so it counts towards neither acceptance nor the energy
+  # diagnostics.
+  retained <- max(burn_in + 1, 2):n_iterations
+  samples <- chain[(burn_in + 1):n_iterations, , drop = FALSE]
+  acceptance_rate <- mean(accepted[retained])
+  final_energy_changes <- energy_changes[retained]
+
+
   # Diagnostics
   avg_energy_change <- mean(abs(final_energy_changes[is.finite(final_energy_changes)]))
   if (acceptance_rate < 0.6) {

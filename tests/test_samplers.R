@@ -7,6 +7,8 @@
 source("adaptive_algorithms.R")
 source("metropolis_hastings.R")
 source("basic_monte_carlo.R")
+source("generic_mcmc.R")
+source("hmc_leapfrog.R")
 
 # Standard normal in d dimensions, up to a constant.
 std_normal <- function(d) function(x) -0.5 * sum(x^2)
@@ -135,27 +137,68 @@ test_that("Random Walk Metropolis recovers a standard normal", {
 })
 
 # ---------------------------------------------------------------------------
-test_that("the two families read n_iterations differently, on purpose", {
-  # Worth pinning, because the same argument name means two things here and
-  # the difference is silent. metropolis_hastings.R follows the thesis
-  # algorithms, where n_iterations is the number of draws you asked to keep
-  # and burn_in is run on top of it. adaptive_algorithms.R treats
-  # n_iterations as the total length of the chain, with burn_in taken out of
-  # it, which is what the benchmark is calibrated against.
+test_that("every sampler reads n_iterations as the total chain length", {
+  # The two families used to disagree. metropolis_hastings.R and
+  # generic_mcmc.R ran burn_in steps on top of n_iterations, so the same
+  # arguments produced a longer chain there than in adaptive_algorithms.R.
+  # The difference was silent and it broke the benchmark's timing columns:
+  # two algorithms given identical arguments did different amounts of work.
   #
-  # Neither is wrong, but a test that fails if someone quietly unifies them
-  # is cheaper than discovering it through a draw count that halved.
+  # Now every sampler runs exactly n_iterations steps and returns
+  # n_iterations - burn_in of them.
   set.seed(19)
   target <- std_normal(2)
+  grad <- function(q) -q
 
-  mh <- random_walk_metropolis(target, proposal_sd = 2.4, initial_value = c(0, 0),
-                               n_iterations = 4000, burn_in = 1000)
-  am <- adaptive_metropolis(target, initial_value = c(0, 0),
-                            n_iterations = 4000, burn_in = 1000)
+  fits <- list(
+    RWM_MH = random_walk_metropolis(target, proposal_sd = 2.4, initial_value = c(0, 0),
+                                    n_iterations = 4000, burn_in = 1000),
+    MH = metropolis_hastings(target,
+                             proposal_sample = function(x) x + rnorm(length(x), 0, 2.4),
+                             proposal_log_density = function(a, b) 0,
+                             initial_value = c(0, 0),
+                             n_iterations = 4000, burn_in = 1000),
+    AM = adaptive_metropolis(target, initial_value = c(0, 0),
+                             n_iterations = 4000, burn_in = 1000),
+    RAM = robust_adaptive_metropolis(target, initial_value = c(0, 0),
+                                     n_iterations = 4000, burn_in = 1000),
+    RWM_base = random_walk_baseline(target, initial_value = c(0, 0),
+                                    n_iterations = 4000, burn_in = 1000),
+    HMC = quietly(hamiltonian_monte_carlo(target, grad, step_size = 0.2,
+                                          n_leapfrog_steps = 5, initial_value = c(0, 0),
+                                          n_iterations = 4000, burn_in = 1000)),
+    GENERIC = generic_mcmc(target,
+                           transition_kernel = function(x) {
+                             y <- x + rnorm(length(x), 0, 2.4)
+                             list(state = y, acceptance_prob = exp(min(0, target(y) - target(x))))
+                           },
+                           initial_value = c(0, 0),
+                           n_iterations = 4000, burn_in = 1000)
+  )
 
-  expect_equal(nrow(mh$full_chain), 5000)   # 4000 requested + 1000 burn-in
-  expect_equal(nrow(mh$samples), 4000)
+  for (nm in names(fits)) {
+    expect_equal(nrow(fits[[nm]]$full_chain), 4000, info = nm)
+    expect_equal(nrow(fits[[nm]]$samples), 3000, info = nm)
+  }
+})
 
-  expect_equal(nrow(am$full_chain), 4000)   # 4000 total, burn-in included
-  expect_equal(nrow(am$samples), 3000)
+# ---------------------------------------------------------------------------
+test_that("a burn-in that swallows the chain is rejected, not silently wrong", {
+  # chain[(burn_in + 1):n_iterations, ] with burn_in >= n_iterations does not
+  # error in R: 1001:1000 counts backwards and returns two rows, one of them
+  # out of bounds and therefore NA. Every sampler used to accept this and
+  # hand back that garbage.
+  set.seed(20)
+  target <- std_normal(2)
+
+  expect_error(adaptive_metropolis(target, c(0, 0), n_iterations = 1000, burn_in = 1000),
+               "0 <= burn_in < n_iterations")
+  expect_error(robust_adaptive_metropolis(target, c(0, 0), n_iterations = 500, burn_in = 900),
+               "0 <= burn_in < n_iterations")
+  expect_error(random_walk_baseline(target, c(0, 0), n_iterations = 500, burn_in = 900),
+               "0 <= burn_in < n_iterations")
+  expect_error(random_walk_metropolis(target, 2.4, c(0, 0), n_iterations = 100, burn_in = 100),
+               "0 <= burn_in < n_iterations")
+  expect_error(adaptive_metropolis(target, c(0, 0), n_iterations = 1, burn_in = 0),
+               "n_iterations >= 2")
 })

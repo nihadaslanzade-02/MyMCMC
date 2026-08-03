@@ -35,9 +35,12 @@ expect_true <- function(object, info = NULL) {
   invisible(TRUE)
 }
 
-expect_equal <- function(object, expected, tolerance = 1e-8) {
+expect_equal <- function(object, expected, tolerance = 1e-8, info = NULL) {
   cmp <- all.equal(object, expected, tolerance = tolerance)
-  if (!isTRUE(cmp)) fail(paste0("not equal: ", paste(cmp, collapse = "; ")))
+  if (!isTRUE(cmp)) {
+    fail(paste0("not equal: ", paste(cmp, collapse = "; "),
+                if (!is.null(info)) paste0(" (", info, ")")))
+  }
   invisible(TRUE)
 }
 
@@ -80,6 +83,15 @@ expect_error <- function(expr, regexp = NULL) {
                  conditionMessage(caught)))
   }
   invisible(TRUE)
+}
+
+# Several samplers print tuning advice with cat() when the acceptance rate
+# sits outside their healthy band. That is useful at the console and noise in
+# a test log, so tests that deliberately run a sampler off-target wrap it.
+quietly <- function(expr) {
+  result <- NULL
+  invisible(utils::capture.output(result <- expr))
+  result
 }
 
 test_that <- function(desc, code) {

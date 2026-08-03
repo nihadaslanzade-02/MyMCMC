@@ -4,11 +4,14 @@
 # analyze_results.R reads a file and writes figures, so it is exercised by
 # handing it fixtures rather than by importing functions out of it.
 
+# The script prints four summary tables on every run. Useful at the console,
+# unreadable in a test log, so the output is swallowed and only the files it
+# writes are inspected.
 run_analysis_in <- function(dir) {
   script <- normalizePath("analyze_results.R")
   old <- setwd(dir)
   on.exit(setwd(old), add = TRUE)
-  source(script, local = new.env(parent = globalenv()))
+  quietly(source(script, local = new.env(parent = globalenv())))
 }
 
 # A results file in the current schema, small enough to plot quickly.
