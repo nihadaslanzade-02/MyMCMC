@@ -295,49 +295,21 @@ cat("Successfully loaded:", length(reference_posteriors),
     "of", length(all_selected_models), "reference posteriors\n")
 
 # ============================================================================
-# 8. BENCHMARK CONFIGURATION
+# 8. SAVE CONFIGURATION
 # ============================================================================
-
-benchmark_config <- list(
-  # Algorithm settings
-  n_iterations = 10000,
-  burn_in = 1000,
-  n_chains = 4,
-  
-  # Adaptive algorithm settings
-  am_config = list(
-    initial_cov_scale = 0.1,
-    adaptation_start = 100,
-    target_acceptance = 0.234
-  ),
-  
-  ram_config = list(
-    initial_scale = 1.0,
-    target_acceptance = 0.234,
-    gamma = 0.6
-  ),
-  
-  rwm_config = list(
-    proposal_sd = 2.38
-  ),
-  
-  # Metrics to compute
-  metrics = c("ess", "rhat", "rmse", "acceptance_rate", "time"),
-  
-  # Thinning
-  thin = 1,
-  
-  # Random seed
-  seed = 42
-)
-
-# ============================================================================
-# 9. SAVE CONFIGURATION
-# ============================================================================
+# What gets saved here is data: the selected models, their reference draws,
+# and the discovery results behind the selection. Stage 2 reads the reference
+# draws straight out of this file, which is what lets it run offline.
+#
+# An algorithm settings block used to be saved alongside them - iteration
+# counts, adaptation_start, target_acceptance, a thinning factor and a seed -
+# and nothing ever read a single field of it. run_benchmarking.R defined its
+# own settings inline and the two quietly disagreed. Settings that live in a
+# 9 MB binary you cannot open in an editor are worse than no settings at all,
+# so they now live in the script that acts on them.
 
 saveRDS(list(
   models = reference_posteriors,
-  config = benchmark_config,
   all_available = names(posteriors_with_refs),
   selected = all_selected_models,
   dimensions = list(
@@ -349,7 +321,7 @@ saveRDS(list(
 ), file = "benchmark_config.rds")
 
 # ============================================================================
-# 10. SUMMARY REPORT
+# 9. SUMMARY REPORT
 # ============================================================================
 
 cat("\n\n")

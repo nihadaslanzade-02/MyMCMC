@@ -37,6 +37,8 @@ if (!identical(benchmark$schema, "chainwise-diagnostics-v2")) {
 results <- benchmark$results
 cat("Loaded", length(results), "models from", RESULTS_FILE, "\n")
 
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 # ============================================================================
 # 1. CREATE SUMMARY TABLE
 # ============================================================================
@@ -55,6 +57,10 @@ for (model_name in names(results)) {
       Model = model_name,
       Algorithm = algo_name,
       Dimension = attr(model_res, "dimension"),
+      # Whether this model was sampled through its own Stan program or
+      # through a Gaussian fitted to its reference draws. Carried into every
+      # table so the two can never be read as the same experiment.
+      Target = attr(model_res, "target_kind") %||% "unknown",
       # Averaged over chains, because accuracy and acceptance are per-chain.
       RMSE = mean(unlist(per_chain$rmse), na.rm = TRUE),
       MAE = mean(unlist(per_chain$mae), na.rm = TRUE),
@@ -93,8 +99,18 @@ n_chains_run <- max(unlist(lapply(results, function(m) {
   max(vapply(m, function(a) a$n_chains_completed, integer(1)))
 })))
 dim_range <- range(summary_df$Dimension, na.rm = TRUE)
-coverage <- sprintf("%d models, %d chains each, %d to %d parameters",
-                    n_models, n_chains_run, dim_range[1], dim_range[2])
+n_iterations <- benchmark$config$n_iterations %||% NA
+
+# Which target each model was sampled through goes into the subtitle too. A
+# figure mixing real Stan posteriors with Gaussian surrogates has to say so on
+# its face, not in a caption somewhere else.
+target_mix <- table(summary_df$Target[!duplicated(summary_df$Model)])
+target_note <- paste(names(target_mix), target_mix, sep = ": ", collapse = ", ")
+
+coverage <- sprintf("%d models, %d chains of %s iterations, %d to %d parameters (%s)",
+                    n_models, n_chains_run,
+                    if (is.na(n_iterations)) "?" else format(n_iterations, big.mark = ","),
+                    dim_range[1], dim_range[2], target_note)
 
 # Add dimension category
 summary_df$DimCategory <- cut(as.numeric(summary_df$Dimension), 
@@ -107,8 +123,9 @@ cat("BENCHMARK RESULTS SUMMARY\n")
 cat(rep("=", 80), "\n\n", sep = "")
 
 print(knitr::kable(summary_df %>%
-                     select(Model, Algorithm, Dimension, Acceptance,
-                            ESS_per_sec, RMSE, RMSE_normalised, Runtime) %>%
+                     select(Model, Algorithm, Target, Dimension, Acceptance,
+                            ESS_median, ESS_per_sec, Rhat_max,
+                            RMSE, RMSE_normalised, Runtime) %>%
                      arrange(Model, Algorithm),
                    digits = 3, format = "markdown"))
 

@@ -15,6 +15,7 @@
 TESTS <- new.env()
 TESTS$passed <- 0L
 TESTS$failed <- 0L
+TESTS$skipped <- 0L
 TESTS$failures <- character(0)
 TESTS$current <- NA_character_
 
@@ -85,6 +86,18 @@ expect_error <- function(expr, regexp = NULL) {
   invisible(TRUE)
 }
 
+# Some tests need a C++ toolchain and the BridgeStan sources, which CI does
+# not have and most checkouts will not either. Those tests skip rather than
+# fail, and say why, so the reason is visible instead of the test quietly not
+# existing.
+skip_if <- function(condition, reason) {
+  if (isTRUE(condition)) {
+    stop(structure(class = c("test_skip", "error", "condition"),
+                   list(message = reason, call = NULL)))
+  }
+  invisible(FALSE)
+}
+
 # Several samplers print tuning advice with cat() when the acceptance rate
 # sits outside their healthy band. That is useful at the console and noise in
 # a test log, so tests that deliberately run a sampler off-target wrap it.
@@ -101,6 +114,9 @@ test_that <- function(desc, code) {
   if (identical(result, "pass")) {
     TESTS$passed <- TESTS$passed + 1L
     cat(sprintf("  PASS  %s\n", desc))
+  } else if (inherits(result, "test_skip")) {
+    TESTS$skipped <- TESTS$skipped + 1L
+    cat(sprintf("  SKIP  %s\n          %s\n", desc, conditionMessage(result)))
   } else {
     TESTS$failed <- TESTS$failed + 1L
     msg <- sprintf("%s\n          %s", desc, conditionMessage(result))
@@ -130,7 +146,8 @@ for (f in test_files) {
 }
 
 cat("\n", strrep("=", 70), "\n", sep = "")
-cat(sprintf("%d passed, %d failed\n", TESTS$passed, TESTS$failed))
+cat(sprintf("%d passed, %d failed, %d skipped\n",
+            TESTS$passed, TESTS$failed, TESTS$skipped))
 cat(strrep("=", 70), "\n", sep = "")
 
 if (TESTS$failed > 0) {

@@ -14,6 +14,12 @@
 *.utf8.md
 *.knit.md
 
+# Compiled Stan models. bridgestan writes a shared library next to each .stan
+# file; those are large, platform specific, and rebuilt from the cached source
+# in a couple of minutes. The .stan and .json alongside them come from
+# posteriordb and are re-fetched just as easily.
+stan_cache/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,245 +1,195 @@
 # ============================================================================
 # BENCHMARKING ADAPTIVE MCMC WITH POSTERIORDB
-# Complete benchmarking with Stan model integration
+# Stage 2: build the targets, run the chains, measure them
 # ============================================================================
+# Stage 1 (benchmarking_posteriordb.R) has already selected the models and
+# saved their reference draws into benchmark_config.rds. This stage reads them
+# from there rather than going back to GitHub for the same data, so it runs
+# offline and reproducibly. The posteriordb connection is opened lazily, and
+# only when a target actually needs the Stan program - see stan_targets.R.
 
-library(bridgestan)
-library(posteriordb)
 library(posterior)
 library(dplyr)
 
 source("adaptive_algorithms.R")
 source("benchmark_metrics.R")
+source("stan_targets.R")
 
 # ============================================================================
-# CREATE LOG DENSITY FUNCTION
+# SETTINGS
 # ============================================================================
-create_log_density <- function(posterior_name, pdb) {
-  
-  cat("  Setting up model...\n")
-  
-  # Get posterior object
-  po <- posteriordb::posterior(posterior_name, pdb)
-  
-  # Load reference posterior to understand parameter structure
-  ref_draws <- tryCatch({
-    posteriordb::reference_posterior_draws(po)
-  }, error = function(e) {
-    cat("    ERROR loading reference draws:", e$message, "\n")
-    return(NULL)
-  })
-  
-  if (is.null(ref_draws)) {
-    cat("    No reference posterior available\n")
-    return(list(success = FALSE))
-  }
-  
-  ref_matrix <- posterior::as_draws_matrix(ref_draws)
-  
-  # Get parameter names (exclude lp__, etc.)
-  all_names <- colnames(ref_matrix)
-  param_names <- all_names[!grepl("^lp__|^energy__|^accept_stat__|^stepsize__|^treedepth__|^n_leapfrog__|^divergent__", all_names)]
-  d <- length(param_names)
-  
-  if (d == 0) {
-    cat("    ERROR: No valid parameters found\n")
-    return(list(success = FALSE))
-  }
-  
-  cat("    Dimension:", d, "parameters\n")
-  
-  # Extract reference statistics
-  ref_matrix_params <- ref_matrix[, param_names, drop = FALSE]
-  ref_mean <- colMeans(ref_matrix_params)
-  ref_cov <- cov(ref_matrix_params)
-  
-  # Add small regularization for numerical stability
-  ref_cov <- ref_cov + diag(1e-6, d)
-  
-  # Compute inverse covariance
-  ref_cov_inv <- tryCatch({
-    solve(ref_cov)
-  }, error = function(e) {
-    cat("    WARNING: Singular covariance, using diagonal approximation\n")
-    diag(1 / (diag(ref_cov) + 1e-6))
-  })
-  
-  # Compute log determinant
-  log_det <- determinant(ref_cov, logarithm = TRUE)$modulus[1]
-  
-  # Create multivariate normal log density
-  log_density_fn <- function(theta) {
-    if (any(!is.finite(theta))) return(-Inf)
-    if (length(theta) != d) return(-Inf)
-    
-    # MVN log density: -0.5 * (log(det(Sigma)) + (x-mu)' Sigma^-1 (x-mu) + d*log(2*pi))
-    delta <- theta - ref_mean
-    quad_form <- as.numeric(t(delta) %*% ref_cov_inv %*% delta)
-    
-    -0.5 * (log_det + quad_form + d * log(2 * pi))
-  }
-  
-  return(list(
-    log_density = log_density_fn,
-    dimension = d,
-    param_names = param_names,
-    reference_mean = ref_mean,
-    reference_cov = ref_cov,
-    success = TRUE
-  ))
+# Everything that decides what gets run lives here, in the script that runs
+# it. An earlier version also carried an algorithm settings block inside
+# benchmark_config.rds - adaptation_start, target_acceptance, proposal_sd, a
+# thinning factor and a seed - that nothing ever read. Settings buried in a
+# 9 MB binary you cannot open in an editor, disagreeing with the code, are
+# worse than no settings at all.
+BENCHMARK_CONFIG <- list(
+  # Total chain length. Every sampler here treats n_iterations as the whole
+  # chain with burn_in taken out of it; see the note at the top of
+  # adaptive_algorithms.R.
+  n_iterations = 100000,
+  burn_in_fraction = 0.5,
+  n_chains = 4,
+
+  # Skip anything wider than this. mcycle_gp-accel_gp has 66 parameters and
+  # is the one selected model this excludes.
+  max_dimension = 50,
+
+  # "gaussian"   - fit a multivariate normal to the reference draws
+  # "bridgestan" - compile and call the posterior's own Stan program
+  # "auto"       - prefer bridgestan, fall back to the surrogate with a note
+  target_method = "auto",
+
+  # Chains are seeded deterministically from this, so a re-run reproduces the
+  # numbers exactly. The seed used to be declared in stage 1 and never set.
+  seed = 42
+)
+
+# One seed per (model, algorithm, chain), so that chains are independent of
+# each other and none of them depends on how many ran before.
+chain_seed <- function(base, model_index, algo_index, chain) {
+  base * 1000000L + model_index * 10000L + algo_index * 100L + chain
 }
+
+# Each algorithm behind the same call, because they do not take the same
+# arguments. The baseline is the only one that needs the target's scale: it
+# never adapts, so it has to be told the size of a sensible step up front.
+ALGORITHMS <- list(
+  "AM" = function(target, init, n_iterations, burn_in) {
+    adaptive_metropolis(target$log_density, init, n_iterations, burn_in)
+  },
+  "RAM" = function(target, init, n_iterations, burn_in) {
+    robust_adaptive_metropolis(target$log_density, init, n_iterations, burn_in)
+  },
+  "RWM_baseline" = function(target, init, n_iterations, burn_in) {
+    random_walk_baseline(target$log_density, init, n_iterations, burn_in,
+                         proposal_scale = target$sampling_scale)
+  }
+)
 
 # ============================================================================
 # RUN BENCHMARK FOR ONE MODEL
 # ============================================================================
-benchmark_model <- function(posterior_name, pdb, algorithms, 
-                            n_iterations = 10000, n_chains = 4,
-                            max_dimension = 50) {
-  
-  cat("\n", rep("=", 70), "\n", sep = "")
-  cat("BENCHMARKING:", posterior_name, "\n")
-  cat(rep("=", 70), "\n", sep = "")
-  
-  # CREATE LOG DENSITY FUNCTION
-  density_info <- create_log_density(posterior_name, pdb)
-  
-  if (!density_info$success) {
-    cat("  SKIPPING: Failed to compile model\n")
+benchmark_model <- function(posterior_name, model_entry, pdb, algorithms,
+                            model_index, settings) {
+
+  cat("\n", strrep("=", 70), "\n", sep = "")
+  cat("BENCHMARKING: ", posterior_name, "\n", sep = "")
+  cat(strrep("=", 70), "\n", sep = "")
+
+  ref_matrix <- as.matrix(model_entry$reference_draws)
+  n_params <- ncol(ref_matrix)
+
+  # Checked before building anything, because compiling a Stan model for a
+  # posterior that is then skipped costs minutes for nothing.
+  if (n_params > settings$max_dimension) {
+    cat("  SKIPPING: dimension ", n_params, " exceeds maximum ",
+        settings$max_dimension, "\n", sep = "")
     return(NULL)
   }
-  
-  d <- density_info$dimension
-  
-  # Skip if dimension too large
-  if (d > max_dimension) {
-    cat("  SKIPPING: Dimension", d, "exceeds maximum", max_dimension, "\n")
-    return(NULL)
-  }
-  
-  log_density <- density_info$log_density
-  param_names <- density_info$param_names
-  
-  # Load reference posterior
-  cat("  Loading reference posterior...\n")
-  po <- posteriordb::posterior(posterior_name, pdb)
-  
-  ref_draws <- tryCatch({
-    posteriordb::reference_posterior_draws(po)
-  }, error = function(e) {
-    cat("  ERROR loading reference draws:", e$message, "\n")
-    return(NULL)
-  })
-  
-  if (is.null(ref_draws)) {
-    cat("  SKIPPING: No reference posterior available\n")
-    return(NULL)
-  }
-  
-  ref_matrix <- posterior::as_draws_matrix(ref_draws)
-  
-  # Match parameter names
-  common_params <- intersect(param_names, colnames(ref_matrix))
-  if (length(common_params) == 0) {
-    cat("  SKIPPING: No matching parameters between model and reference\n")
-    return(NULL)
-  }
-  
-  ref_matrix <- ref_matrix[, common_params, drop = FALSE]
-  cat("  Using", length(common_params), "matched parameters\n")
-  
-  # Initial value (use reference mean)
-  initial <- colMeans(ref_matrix)
-  reference_means <- colMeans(ref_matrix)
-  # Per-parameter spread under the reference posterior, used to put the
-  # accuracy metrics on a scale that is comparable across models.
-  reference_sds <- apply(ref_matrix, 2, sd)
+
+  target <- tryCatch(
+    build_target(posterior_name, ref_matrix, pdb, method = settings$target_method),
+    error = function(e) {
+      cat("  SKIPPING: could not build a target:", conditionMessage(e), "\n")
+      NULL
+    }
+  )
+  if (is.null(target)) return(NULL)
+
+  n_iterations <- settings$n_iterations
+  burn_in <- floor(n_iterations * settings$burn_in_fraction)
+
+  cat("  Target: ", target$kind, ", ", n_params, " parameters",
+      if (target$dimension != n_params)
+        paste0(" (", target$dimension, " unconstrained)") else "",
+      "\n", sep = "")
 
   results <- list()
 
-  # Run each algorithm
-  for (algo_name in names(algorithms)) {
+  for (algo_index in seq_along(algorithms)) {
+    algo_name <- names(algorithms)[algo_index]
     cat("\n  Running:", algo_name, "\n")
 
     algo_results <- list()
     chain_samples <- list()
 
-    for (chain in 1:n_chains) {
-      cat("    Chain", chain, "...")
+    for (chain in seq_len(settings$n_chains)) {
+      cat("    Chain ", chain, "...", sep = "")
 
-      # Slight perturbation of initial value
-      init <- initial + rnorm(d, 0, 0.1)
+      set.seed(chain_seed(settings$seed, model_index, algo_index, chain))
+      init <- target$init()
 
-      # Time the algorithm
       start_time <- Sys.time()
-
       algo_output <- tryCatch({
-        algorithms[[algo_name]](
-          target_log_density = log_density,
-          initial_value = init,
-          n_iterations = n_iterations,
-          burn_in = floor(n_iterations / 2)
-        )
+        algorithms[[algo_name]](target, init, n_iterations, burn_in)
       }, error = function(e) {
-        cat(" ERROR:", e$message, "\n")
-        return(NULL)
+        cat(" ERROR:", conditionMessage(e), "\n")
+        NULL
       })
-
-      if (is.null(algo_output)) {
-        next
-      }
-
+      if (is.null(algo_output)) next
       runtime <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
 
-      cat(" Done (", round(runtime, 1), "s, acc=",
+      cat(" done (", round(runtime, 1), "s, acc=",
           round(algo_output$acceptance_rate, 3), ")\n", sep = "")
+
+      # Everything is measured on the constrained scale, so the surrogate and
+      # bridgestan runs report the same quantities and stay comparable.
+      draws <- target$to_constrained(algo_output$samples)
 
       # Per-chain accuracy only. The convergence diagnostics need every chain
       # at once and are computed below, after the loop.
-      accuracy <- compute_accuracy(algo_output$samples, reference_means, runtime,
-                                   reference_sds)
+      accuracy <- compute_accuracy(draws, target$reference_mean, runtime,
+                                   target$reference_sd)
 
-      chain_samples[[length(chain_samples) + 1]] <- algo_output$samples
-
+      chain_samples[[length(chain_samples) + 1]] <- draws
       algo_results[[length(algo_results) + 1]] <- c(
         accuracy,
         acceptance_rate = algo_output$acceptance_rate
       )
     }
 
-    # Aggregate across chains
-    if (length(algo_results) > 0) {
-      per_chain <- data.frame(do.call(rbind, algo_results))
-
-      # Chains run sequentially, so the wall-clock cost of the whole set is
-      # their total. ESS is likewise an all-chains quantity, so ESS/second is
-      # formed from the two totals rather than from one chain's share.
-      total_runtime <- sum(unlist(per_chain$runtime), na.rm = TRUE)
-
-      convergence <- compute_convergence(chain_samples, common_params, total_runtime)
-
-      cat(sprintf(
-        "    -> ESS bulk median %.1f of %d draws, R-hat max %.3f (%d/%d parameters unconverged)\n",
-        convergence$ess_bulk_median, convergence$total_draws,
-        convergence$rhat_max, convergence$n_params_unconverged, convergence$n_params
-      ))
-
-      results[[algo_name]] <- list(
-        per_chain = per_chain,
-        convergence = convergence,
-        total_runtime = total_runtime,
-        n_chains_completed = length(chain_samples)
-      )
-    } else {
+    if (length(algo_results) == 0) {
       cat("    No successful chains for", algo_name, "\n")
+      next
     }
+
+    per_chain <- data.frame(do.call(rbind, algo_results))
+
+    # Chains run sequentially, so the wall-clock cost of the whole set is
+    # their total. ESS is likewise an all-chains quantity, so ESS/second is
+    # formed from the two totals rather than from one chain's share.
+    total_runtime <- sum(unlist(per_chain$runtime), na.rm = TRUE)
+
+    convergence <- compute_convergence(chain_samples, target$param_names,
+                                       total_runtime)
+
+    cat(sprintf(
+      "    -> ESS bulk median %.1f of %d draws, R-hat max %.3f (%d/%d parameters unconverged)\n",
+      convergence$ess_bulk_median, convergence$total_draws,
+      convergence$rhat_max, convergence$n_params_unconverged, convergence$n_params
+    ))
+
+    results[[algo_name]] <- list(
+      per_chain = per_chain,
+      convergence = convergence,
+      total_runtime = total_runtime,
+      n_chains_completed = length(chain_samples)
+    )
   }
-  
-  # Add metadata
+
+  # Metadata. target_kind travels with the result so that a summary can never
+  # silently mix a run against the real posterior with one against a Gaussian
+  # fitted to it.
   attr(results, "model_name") <- posterior_name
-  attr(results, "dimension") <- d
-  attr(results, "n_chains") <- n_chains
+  attr(results, "dimension") <- n_params
+  attr(results, "sampling_dimension") <- target$dimension
+  attr(results, "target_kind") <- target$kind
+  attr(results, "n_chains") <- settings$n_chains
   attr(results, "n_iterations") <- n_iterations
-  
+  attr(results, "burn_in") <- burn_in
+
   results
 }
 
@@ -248,75 +198,74 @@ benchmark_model <- function(posterior_name, pdb, algorithms,
 # ============================================================================
 
 cat("\n")
-cat(rep("=", 70), "\n", sep = "")
+cat(strrep("=", 70), "\n", sep = "")
 cat("ADAPTIVE MCMC BENCHMARKING WITH POSTERIORDB\n")
-cat(rep("=", 70), "\n\n", sep = "")
+cat(strrep("=", 70), "\n\n", sep = "")
 
-# Load configuration
 cat("Loading configuration...\n")
-pdb <- posteriordb::pdb_github()
 config <- readRDS("benchmark_config.rds")
 selected_models <- names(config$models)
 
+if (length(selected_models) == 0) {
+  stop("benchmark_config.rds holds no models. Run benchmarking_posteriordb.R first.")
+}
+
 cat("Found", length(selected_models), "models to benchmark\n")
-
-# Define algorithms
-algorithms <- list(
-  "AM" = adaptive_metropolis,
-  "RAM" = robust_adaptive_metropolis,
-  "RWM_baseline" = random_walk_baseline
-)
-
-cat("Testing", length(algorithms), "algorithms:", 
-    paste(names(algorithms), collapse = ", "), "\n")
-
-# Benchmarking parameters
-BENCHMARK_CONFIG <- list(
-  n_iterations = 10000,
-  n_chains = 4,
-  max_dimension = 50  # Skip models with too many parameters
-)
+cat("Testing", length(ALGORITHMS), "algorithms:",
+    paste(names(ALGORITHMS), collapse = ", "), "\n")
 
 cat("\nBenchmark settings:\n")
-cat("  Iterations:", BENCHMARK_CONFIG$n_iterations, "\n")
-cat("  Chains per algorithm:", BENCHMARK_CONFIG$n_chains, "\n")
-cat("  Max dimension:", BENCHMARK_CONFIG$max_dimension, "\n")
+cat("  Iterations (total): ", BENCHMARK_CONFIG$n_iterations, "\n", sep = "")
+cat("  Burn-in:            ",
+    floor(BENCHMARK_CONFIG$n_iterations * BENCHMARK_CONFIG$burn_in_fraction),
+    "\n", sep = "")
+cat("  Chains:             ", BENCHMARK_CONFIG$n_chains, "\n", sep = "")
+cat("  Max dimension:      ", BENCHMARK_CONFIG$max_dimension, "\n", sep = "")
+cat("  Target:             ", BENCHMARK_CONFIG$target_method, "\n", sep = "")
+cat("  Seed:               ", BENCHMARK_CONFIG$seed, "\n", sep = "")
 
-# Run benchmark
+# Only opened if a target needs the Stan source; the reference draws come from
+# the config file.
+pdb <- NULL
+if (BENCHMARK_CONFIG$target_method != "gaussian") {
+  pdb <- tryCatch(posteriordb::pdb_github(), error = function(e) {
+    cat("\nCould not reach posteriordb (", conditionMessage(e), ").\n", sep = "")
+    cat("Falling back to the Gaussian surrogate for every model.\n")
+    BENCHMARK_CONFIG$target_method <<- "gaussian"
+    NULL
+  })
+}
+
 all_results <- list()
 successful_models <- 0
 failed_models <- 0
 
 for (i in seq_along(selected_models)) {
   model_name <- selected_models[i]
-  
   cat("\n[", i, "/", length(selected_models), "] ", sep = "")
-  
+
   result <- tryCatch({
-    benchmark_model(
-      model_name, 
-      pdb, 
-      algorithms,
-      n_iterations = BENCHMARK_CONFIG$n_iterations,
-      n_chains = BENCHMARK_CONFIG$n_chains,
-      max_dimension = BENCHMARK_CONFIG$max_dimension
-    )
+    benchmark_model(model_name, config$models[[model_name]], pdb, ALGORITHMS,
+                    model_index = i, settings = BENCHMARK_CONFIG)
   }, error = function(e) {
-    cat("FATAL ERROR with", model_name, ":", e$message, "\n")
-    traceback()
-    return(NULL)
+    cat("FATAL ERROR with", model_name, ":", conditionMessage(e), "\n")
+    NULL
   })
-  
+
   if (!is.null(result) && length(result) > 0) {
     all_results[[model_name]] <- result
     successful_models <- successful_models + 1
   } else {
     failed_models <- failed_models + 1
   }
-  
-  # Save intermediate results
+
+  # Checkpoint, in the same envelope as the final file so it can be inspected
+  # with the same code.
   if (i %% 3 == 0) {
-    saveRDS(all_results, "benchmark_results_partial.rds")
+    saveRDS(list(schema = "chainwise-diagnostics-v2", results = all_results,
+                 config = BENCHMARK_CONFIG, partial = TRUE,
+                 models_done = i, models_total = length(selected_models)),
+            "benchmark_results_partial.rds")
     cat("\n  [Saved intermediate results]\n")
   }
 }
@@ -326,15 +275,16 @@ for (i in seq_along(selected_models)) {
 # ============================================================================
 
 cat("\n\n")
-cat(rep("=", 70), "\n", sep = "")
+cat(strrep("=", 70), "\n", sep = "")
 cat("BENCHMARKING COMPLETE\n")
-cat(rep("=", 70), "\n", sep = "")
+cat(strrep("=", 70), "\n", sep = "")
 cat("Successful models:", successful_models, "\n")
 cat("Failed/skipped models:", failed_models, "\n")
-cat("\nResults saved to: benchmark_results.rds\n")
 
-# Save with metadata.
-#
+target_kinds <- vapply(all_results, function(r) attr(r, "target_kind"), character(1))
+cat("Targets used:", paste(names(table(target_kinds)), table(target_kinds),
+                           sep = " x ", collapse = ", "), "\n")
+
 # `schema` marks results produced by the corrected diagnostics. Files written
 # before that fix carry per-chain ESS and R-hat values that are not what their
 # names say, so analyze_results.R checks for this marker and refuses to plot a
@@ -343,13 +293,17 @@ final_output <- list(
   schema = "chainwise-diagnostics-v2",
   results = all_results,
   config = BENCHMARK_CONFIG,
-  algorithms = names(algorithms),
+  algorithms = names(ALGORITHMS),
+  target_kinds = target_kinds,
   timestamp = Sys.time(),
   n_successful = successful_models,
   n_failed = failed_models,
-  selected_models = selected_models
+  selected_models = selected_models,
+  session = list(r_version = R.version.string,
+                 posterior = as.character(utils::packageVersion("posterior")))
 )
 
 saveRDS(final_output, "benchmark_results.rds")
 
+cat("\nResults saved to: benchmark_results.rds\n")
 cat("\nDone!\n")
