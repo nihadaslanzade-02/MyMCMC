@@ -1,7 +1,8 @@
 "Model","Algorithm","Dimension","ESS_per_sec","Acceptance"
-"earnings-earn_height","RWM_baseline",3,37.514216644967,0.9981
-"earnings-log10earn_height","RWM_baseline",3,36.961981853777,0.00105
-"arma-arma11","RWM_baseline",4,51.7638903431921,0.00265
-"arK-arK","RWM_baseline",7,82.875521795602,0.00225
-"bball_drive_event_0-hmm_drive_0","RWM_baseline",8,91.1991506391409,5e-05
-"bball_drive_event_1-hmm_drive_1","RWM_baseline",8,89.155324054388,3e-04
+"earnings-earn_height","AM",3,562.612155305331,0.319115
+"earnings-log10earn_height","RAM",3,132.811488783061,0.231955
+"arma-arma11","RWM_baseline",4,1465.25838568345,0.292305
+"arK-arK","AM",7,217.053291270744,0.271145
+"bball_drive_event_0-hmm_drive_0","RWM_baseline",8,59.1592605370265,0.25308
+"bball_drive_event_1-hmm_drive_1","AM",8,54.0682643836564,0.265615
+"diamonds-diamonds","AM",26,28.8125853334794,0.23181

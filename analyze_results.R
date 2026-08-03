@@ -109,12 +109,23 @@ n_iterations <- benchmark$config$n_iterations %||% NA
 # figure mixing real Stan posteriors with Gaussian surrogates has to say so on
 # its face, not in a caption somewhere else.
 target_mix <- table(summary_df$Target[!duplicated(summary_df$Model)])
-target_note <- paste(names(target_mix), target_mix, sep = ": ", collapse = ", ")
+target_note <- if (length(target_mix) == 1) {
+  paste("all", names(target_mix))
+} else {
+  paste(names(target_mix), target_mix, sep = ": ", collapse = ", ")
+}
 
-coverage <- sprintf("%d models, %d chains of %s iterations, %d to %d parameters (%s)",
+# scientific = FALSE, or 100000 renders as 1e+05.
+coverage <- sprintf("%d models, %d chains x %s iterations, %d to %d parameters, %s",
                     n_models, n_chains_run,
-                    if (is.na(n_iterations)) "?" else format(n_iterations, big.mark = ","),
+                    if (is.na(n_iterations)) "?" else
+                      format(n_iterations, scientific = FALSE, big.mark = ","),
                     dim_range[1], dim_range[2], target_note)
+
+# Subtitles put the figure's own note on the first line and the run's coverage
+# on the second. On one line the coverage string runs off the right edge of a
+# 10 inch panel.
+subtitle_for <- function(note) paste0(note, "\n", coverage)
 
 # Add dimension category
 summary_df$DimCategory <- cut(as.numeric(summary_df$Dimension), 
@@ -154,6 +165,10 @@ algo_summary <- summary_df %>%
     Mean_ESS = mean(ESS_median, na.rm = TRUE),
     Mean_ESS_per_sec = mean(ESS_per_sec, na.rm = TRUE),
     Worst_Rhat = max(Rhat_max, na.rm = TRUE),
+    # How many models this algorithm failed to converge on. Without it the
+    # ESS/second column reads as a ranking, and an algorithm that produced no
+    # usable samples at all can head it by being fast about it.
+    Models_unconverged = sum(Rhat_max > 1.01, na.rm = TRUE),
     # Only the normalised error is averaged across models. The raw one is on
     # each model's own units, and averaging it reports whichever model has the
     # largest numbers - here earnings-earn_height, whose parameters are in
@@ -163,7 +178,12 @@ algo_summary <- summary_df %>%
     Mean_Runtime = mean(Runtime, na.rm = TRUE),
     .groups = "drop"
   ) %>%
-  arrange(desc(Mean_ESS_per_sec))
+  # Sorted by effective samples, not by effective samples per second. The
+  # per-second figure is genuinely model dependent - on a posterior with no
+  # correlation to learn, the adaptation is pure overhead and the baseline
+  # wins it - so an average across models is not a ranking of anything. It
+  # stays as a column, to be read per model.
+  arrange(desc(Mean_ESS))
 
 print(knitr::kable(algo_summary, digits = 3, format = "markdown"))
 
@@ -224,7 +244,7 @@ p1 <- ggplot(summary_df, aes(x = reorder(Model, Dimension), y = Acceptance,
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Acceptance Rates Across Models",
-       subtitle = paste("Models ordered by dimension.", coverage),
+       subtitle = subtitle_for("Models ordered by dimension."),
        y = "Acceptance Rate",
        x = "Model",
        color = "Algorithm") +
@@ -242,7 +262,7 @@ p2 <- ggplot(summary_df, aes(x = Algorithm, y = ESS_per_sec, fill = Algorithm)) 
   scale_y_log10(labels = scales::comma) +
   scale_fill_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Sampling Efficiency: Effective Sample Size per Second",
-       subtitle = paste0("Across ", coverage, ", log scale"),
+       subtitle = subtitle_for("Log scale."),
        y = "ESS per Second (log₁₀ scale)",
        x = "Algorithm") +
   theme_minimal(base_size = 12) +
@@ -270,7 +290,7 @@ p3 <- ggplot(summary_df, aes(x = Dimension, y = RMSE_normalised,
   scale_y_log10() +
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   labs(title = "Accuracy vs Model Dimension",
-       subtitle = paste("Posterior mean error in reference posterior SDs.", coverage),
+       subtitle = subtitle_for("Posterior mean error in reference posterior SDs."),
        y = "RMSE (reference posterior SDs, log₁₀ scale)",
        x = "Number of Parameters",
        color = "Algorithm",
@@ -297,7 +317,7 @@ p4 <- ggplot(summary_df, aes(x = Dimension, y = Acceptance,
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8", "RWM_baseline" = "#4DAF4A")) +
   scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
   labs(title = "Acceptance Rate Stability Across Dimensions",
-       subtitle = paste("Dashed line marks the 0.234 optimum.", coverage),
+       subtitle = subtitle_for("Dashed line marks the 0.234 optimum."),
        y = "Acceptance Rate",
        x = "Number of Parameters",
        color = "Algorithm",
@@ -325,7 +345,7 @@ p5 <- ggplot(summary_df, aes(x = Condition, y = ESS_median,
   scale_color_manual(values = c("AM" = "#E41A1C", "RAM" = "#377EB8",
                                 "RWM_baseline" = "#4DAF4A")) +
   labs(title = "What Adaptation Buys, Against How Correlated the Posterior Is",
-       subtitle = paste("Condition number of the reference correlation matrix.", coverage),
+       subtitle = subtitle_for("Condition number of the reference correlation matrix."),
        y = "Median ESS (log₁₀ scale)",
        x = "Correlation condition number (log₁₀ scale)",
        color = "Algorithm",
